@@ -273,12 +273,56 @@ let total = (db.value("SELECT count(*) FROM users") ! panic("%{E.message}")).to_
 ```js
 // What a driver has to provide. The driver packages implement this; a program uses `Db`.
 + interface Driver {
+    // Opens a transaction; `immediate` takes the write lock at once where that exists.
+    + fn begin(immediate: bool) void !Error
+    // Closes the connection.
+    + fn close() void
+    + fn commit() void !Error
+    // Which database this is.
+    + get dialect: Dialect
+    // Runs a statement that reads no rows and returns how many rows it changed.
+    + fn exec(sql: String, args: Array[Value]) uint !Error
+    // The id the last insert wrote, where the database has one.
+    + fn last_insert_id() int
+    // Returns whether the connection still answers.
+    + fn ping() bool
+    // Runs a statement and returns its rows.
+    + fn query(sql: String, args: Array[Value]) Rows !Error
+    + fn rollback() void !Error
 }
 ```
 
 ### Driver
 
 What a driver has to provide. The driver packages implement this; a program uses `Db`.
+
+#### begin
+
+Opens a transaction; `immediate` takes the write lock at once where that exists.
+
+#### close
+
+Closes the connection.
+
+#### dialect
+
+Which database this is.
+
+#### exec
+
+Runs a statement that reads no rows and returns how many rows it changed.
+
+#### last_insert_id
+
+The id the last insert wrote, where the database has one.
+
+#### ping
+
+Returns whether the connection still answers.
+
+#### query
+
+Runs a statement and returns its rows.
 
 ```js
 // One migration: a name and the statements it runs.
@@ -675,12 +719,25 @@ Adds `column IS NULL`.
 ```js
 // The rows of one query, read one at a time.
 + interface Rows {
+    // Releases what the query still holds. Reading to the end does this as well.
+    + fn close() void
+    // Reads the next row into `row` and returns whether there was one. The map is cleared first, so one map can serve a whole result.
+    + fn next(row: Map[Value]) bool !Error
 }
 ```
 
 ### Rows
 
 The rows of one query, read one at a time.
+
+#### close
+
+Releases what the query still holds. Reading to the end does this as well.
+
+#### next
+
+Reads the next row into `row` and returns whether there was one. The map is cleared
+first, so one map can serve a whole result.
 
 ```js
 // One value: a cell of a row, or an argument of a statement.

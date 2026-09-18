@@ -8,30 +8,30 @@
 /// What a driver has to provide. The driver packages implement this; a program uses `Db`.
 + interface Driver {
     /// Which database this is.
-    get dialect: Dialect;
+    + get dialect: Dialect;
     /// Runs a statement that reads no rows and returns how many rows it changed.
-    fn exec(sql: String, args: Array[Value]) uint !Error;
+    + fn exec(sql: String, args: Array[Value]) uint !Error;
     /// Runs a statement and returns its rows.
-    fn query(sql: String, args: Array[Value]) Rows !Error;
+    + fn query(sql: String, args: Array[Value]) Rows !Error;
     /// The id the last insert wrote, where the database has one.
-    fn last_insert_id() int;
+    + fn last_insert_id() int;
     /// Opens a transaction; `immediate` takes the write lock at once where that exists.
-    fn begin(immediate: bool) !Error;
-    fn commit() !Error;
-    fn rollback() !Error;
+    + fn begin(immediate: bool) !Error;
+    + fn commit() !Error;
+    + fn rollback() !Error;
     /// Returns whether the connection still answers.
-    fn ping() bool;
+    + fn ping() bool;
     /// Closes the connection.
-    fn close();
+    + fn close();
 }
 
 /// The rows of one query, read one at a time.
 + interface Rows {
     /// Reads the next row into `row` and returns whether there was one. The map is cleared
     /// first, so one map can serve a whole result.
-    fn next(row: Map[Value]) bool !Error;
+    + fn next(row: Map[Value]) bool !Error;
     /// Releases what the query still holds. Reading to the end does this as well.
-    fn close();
+    + fn close();
 }
 
 /// A database, whichever driver is behind it.

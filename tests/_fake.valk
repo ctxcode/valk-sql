@@ -18,16 +18,16 @@ class FakeDriver is sql.Driver {
     + closed: bool (false)
     + transactions: Array[String] (.{})
 
-    get dialect: sql.Dialect {
+    + get dialect: sql.Dialect {
         return this.dialect_kind
     }
 
-    fn exec(statement: String, args: Array[sql.Value]) uint !sql.Error {
+    + fn exec(statement: String, args: Array[sql.Value]) uint !sql.Error {
         this.record(statement, args) !>
         return this.affected
     }
 
-    fn query(statement: String, args: Array[sql.Value]) sql.Rows !sql.Error {
+    + fn query(statement: String, args: Array[sql.Value]) sql.Rows !sql.Error {
         this.record(statement, args) !>
         return FakeRows { rows: this.answer }
     }
@@ -44,22 +44,22 @@ class FakeDriver is sql.Driver {
         }
     }
 
-    fn last_insert_id() int {
+    + fn last_insert_id() int {
         return this.insert_id
     }
-    fn begin(immediate: bool) !sql.Error {
+    + fn begin(immediate: bool) !sql.Error {
         this.transactions.append(immediate ? "begin immediate" : "begin")
     }
-    fn commit() !sql.Error {
+    + fn commit() !sql.Error {
         this.transactions.append("commit")
     }
-    fn rollback() !sql.Error {
+    + fn rollback() !sql.Error {
         this.transactions.append("rollback")
     }
-    fn ping() bool {
+    + fn ping() bool {
         return !this.closed
     }
-    fn close() {
+    + fn close() {
         this.closed = true
     }
 }
@@ -69,7 +69,7 @@ class FakeRows is sql.Rows {
     at: uint (0)
     + closed: bool (false)
 
-    fn next(row: Map[sql.Value]) bool !sql.Error {
+    + fn next(row: Map[sql.Value]) bool !sql.Error {
         if this.at >= this.rows.length : return false
         row.clear()
         let source = this.rows.get(this.at++) !? .{}
@@ -78,7 +78,7 @@ class FakeRows is sql.Rows {
         }
         return true
     }
-    fn close() {
+    + fn close() {
         this.closed = true
     }
 }

@@ -56,11 +56,11 @@ class MemoryDriver is sql.Driver {
     rows: Array[Map[sql.Value]] (.{})
     next_id: int (0)
 
-    get dialect: sql.Dialect {
+    + get dialect: sql.Dialect {
         return sql.Dialect.sqlite
     }
 
-    fn exec(statement: String, args: Array[sql.Value]) uint !sql.Error {
+    + fn exec(statement: String, args: Array[sql.Value]) uint !sql.Error {
         if statement.starts_with("INSERT INTO users") {
             this.next_id++
             let row: Map[sql.Value] = .{}
@@ -80,28 +80,28 @@ class MemoryDriver is sql.Driver {
         return 0
     }
 
-    fn query(statement: String, args: Array[sql.Value]) sql.Rows !sql.Error {
+    + fn query(statement: String, args: Array[sql.Value]) sql.Rows !sql.Error {
         if statement.starts_with("SELECT name FROM schema_migrations") : return MemoryRows { rows: .{} }
         return MemoryRows { rows: this.rows }
     }
 
-    fn last_insert_id() int {
+    + fn last_insert_id() int {
         return this.next_id
     }
-    fn begin(immediate: bool) !sql.Error {}
-    fn commit() !sql.Error {}
-    fn rollback() !sql.Error {}
-    fn ping() bool {
+    + fn begin(immediate: bool) !sql.Error {}
+    + fn commit() !sql.Error {}
+    + fn rollback() !sql.Error {}
+    + fn ping() bool {
         return true
     }
-    fn close() {}
+    + fn close() {}
 }
 
 class MemoryRows is sql.Rows {
     rows: Array[Map[sql.Value]]
     at: uint (0)
 
-    fn next(row: Map[sql.Value]) bool !sql.Error {
+    + fn next(row: Map[sql.Value]) bool !sql.Error {
         if this.at >= this.rows.length : return false
         row.clear()
         let source = this.rows.get(this.at++) !? .{}
@@ -110,5 +110,5 @@ class MemoryRows is sql.Rows {
         }
         return true
     }
-    fn close() {}
+    + fn close() {}
 }
