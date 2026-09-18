@@ -5,7 +5,7 @@ One API over the SQL databases [Valk](https://valk-lang.dev) speaks: SQLite, MyS
 Postgres. It holds what every program writes again otherwise — a connection pool, migrations, a
 query builder, rows read into your own classes — and the driver packages plug into it.
 
-Requires Valk 0.7.2 or newer. This package has no dependencies of its own: it talks to a driver
+Requires Valk 0.7.0 or newer. This package has no dependencies of its own: it talks to a driver
 through an interface, and the driver packages implement it.
 
 ## Install
