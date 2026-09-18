@@ -1,0 +1,82 @@
+use sql
+
+test "Migrations" {
+    let driver = fake()
+    let db = fake_db(driver)
+    let migrator = sql.Migrator.new(db)
+
+    // Files come in as a map, and run in the order of their names
+    migrator.add_many(.{
+        "0002-posts.sql" => "CREATE TABLE posts (id INTEGER PRIMARY KEY);"
+        "0001-users.sql" => "CREATE TABLE users (id INTEGER PRIMARY KEY);\nCREATE INDEX users_id ON users (id);"
+    })
+    assert(migrator.migrations.length == 2)
+    assert((migrator.migrations.get(0) ! { assert(false) return }).name == "0001-users.sql")
+
+    // Nothing has run yet, so everything is pending
+    driver.answer = .{}
+    let pending = migrator.pending() ! { println(E.message) assert(false) return }
+    assert(pending.length == 2)
+
+    let ran = migrator.migrate() ! { println(E.message) assert(false) return }
+    assert(ran.length == 2)
+    assert((ran.get(0) !? "") == "0001-users.sql")
+
+    // The table is created, every statement of a file runs on its own, and the name is recorded
+    let statements = driver.statements
+    assert(statements.any(fn(s: String) bool { return s.starts_with("CREATE TABLE IF NOT EXISTS schema_migrations") }))
+    assert(statements.contains("CREATE TABLE users (id INTEGER PRIMARY KEY)"))
+    assert(statements.contains("CREATE INDEX users_id ON users (id)"))
+    assert(statements.contains("CREATE TABLE posts (id INTEGER PRIMARY KEY)"))
+    assert(statements.any(fn(s: String) bool { return s.starts_with("INSERT INTO schema_migrations") }))
+    // Each migration was wrapped in a transaction
+    assert(driver.transactions.contains("begin"))
+    assert(driver.transactions.contains("commit"))
+
+    // What the table says has run is not run again
+    driver.answer = .{
+        row(.{ "name" => sql.Value.of("0001-users.sql") })
+        row(.{ "name" => sql.Value.of("0002-posts.sql") })
+    }
+    assert((migrator.pending() ! { assert(false) return }).length == 0)
+    assert((migrator.migrate() ! { assert(false) return }).length == 0)
+    assert((migrator.applied() ! { assert(false) return }).length == 2)
+}
+
+test "A migration that fails rolls back" {
+    let driver = fake()
+    let db = fake_db(driver)
+    let migrator = sql.Migrator.new(db)
+    migrator.add("0001-broken.sql", "CREATE TABLE t (a INTEGER);")
+    driver.answer = .{}
+
+    // The statement of the migration fails, not the bookkeeping around it
+    driver.fail_with = "syntax error"
+    driver.fail_when = "CREATE TABLE t"
+    migrator.migrate() ! {
+        assert(error_is(E.code, constraint))
+        assert(E.message.contains("0001-broken.sql"))
+        assert(driver.transactions.contains("rollback"))
+        assert(!driver.transactions.contains("commit"))
+        return
+    }
+    assert(false)
+}
+
+test "Splitting a migration file" {
+    let driver = fake()
+    let db = fake_db(driver)
+    let migrator = sql.Migrator.new(db)
+    driver.answer = .{}
+
+    // Comments are dropped, and a `;` inside text does not split a statement
+    migrator.add("one.sql", "
+        -- create the table
+        CREATE TABLE t (a TEXT);
+        INSERT INTO t VALUES ('a;b');
+    ")
+    migrator.migrate() ! { println(E.message) assert(false) return }
+
+    assert(driver.statements.contains("CREATE TABLE t (a TEXT)"))
+    assert(driver.statements.contains("INSERT INTO t VALUES ('a;b')"))
+}

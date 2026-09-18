@@ -1,0 +1,336 @@
+// What a Query is building
+value QUERY_SELECT (0)
+value QUERY_INSERT (1)
+value QUERY_UPDATE (2)
+value QUERY_DELETE (3)
+
+/// A statement built from its parts, with the values kept apart from the text.
+///
+/// Conditions are written with `?` placeholders and their values passed next to them, so the
+/// values are always bound. `to_sql` writes the placeholders the dialect wants.
+///
+/// ```valk
+/// let rows = db.select("id, name")
+///     .from("users")
+///     .where("age > ?", .{ 18 })
+///     .where("active = ?", .{ true })
+///     .order_by("name")
+///     .limit(10)
+///     .all() ! panic("%{E.message}")
+/// ```
++ class Query {
+    kind: uint (QUERY_SELECT)
+    db: ?Db (null)
+    table: String ("")
+    columns: String ("*")
+    joins: Array[String] (.{})
+    conditions: Array[String] (.{})
+    assignments: Array[String] (.{})
+    insert_columns: Array[String] (.{})
+    insert_rows: uint (0)
+    groups: String ("")
+    havings: Array[String] (.{})
+    orders: String ("")
+    returns: String ("")
+    row_limit: uint (0)
+    row_offset: uint (0)
+    // The values, in the order the parts were added
+    where_args: Array[Value] (.{})
+    join_args: Array[Value] (.{})
+    having_args: Array[Value] (.{})
+    set_args: Array[Value] (.{})
+    insert_args: Array[Value] (.{})
+
+    /// Starts a `SELECT`.
+    + static fn select(columns: String ("*")) Query {
+        return Query { kind: QUERY_SELECT, columns: columns }
+    }
+    /// Starts an `INSERT INTO`.
+    + static fn insert_into(table: String) Query {
+        return Query { kind: QUERY_INSERT, table: table }
+    }
+    /// Starts an `UPDATE`.
+    + static fn update(table: String) Query {
+        return Query { kind: QUERY_UPDATE, table: table }
+    }
+    /// Starts a `DELETE FROM`.
+    + static fn delete_from(table: String) Query {
+        return Query { kind: QUERY_DELETE, table: table }
+    }
+
+    /// Binds the query to a database, so that it can run itself.
+    + fn on(db: Db) SELF {
+        this.db = db
+        return this
+    }
+
+    /// The table to read from.
+    + fn from(table: String) SELF {
+        this.table = table
+        return this
+    }
+
+    /// Adds a join, written as it is: `join("JOIN posts ON posts.user_id = users.id")`.
+    + fn join(clause: String, args: Array[Value] (.{})) SELF {
+        this.joins.append(clause)
+        this.join_args.append_many(args)
+        return this
+    }
+
+    /// Adds a condition. Several conditions are joined with `AND`.
+    ///
+    /// Each `?` in the condition takes the next value from `args`.
+    + fn where(condition: String, args: Array[Value] (.{})) SELF {
+        this.conditions.append(condition)
+        this.where_args.append_many(args)
+        return this
+    }
+
+    /// Adds `column IN (?, ?, …)` with one placeholder per value.
+    + fn where_in(column: String, values: Array[Value]) SELF {
+        if values.length == 0 {
+            // An empty list matches nothing, and `IN ()` is not valid SQL everywhere
+            this.conditions.append("1 = 0")
+            return this
+        }
+        this.conditions.append(column + " IN (" + placeholders(values.length) + ")")
+        this.where_args.append_many(values)
+        return this
+    }
+
+    /// Adds `column IS NULL`.
+    + fn where_null(column: String) SELF {
+        this.conditions.append(column + " IS NULL")
+        return this
+    }
+    /// Adds `column IS NOT NULL`.
+    + fn where_not_null(column: String) SELF {
+        this.conditions.append(column + " IS NOT NULL")
+        return this
+    }
+
+    /// Sets a column of an `UPDATE`.
+    + fn set(column: String, value: Value) SELF {
+        this.assignments.append(column + " = ?")
+        this.set_args.append(value)
+        return this
+    }
+    /// Sets a column of an `UPDATE` to an expression, such as `balance + ?`.
+    + fn set_expression(column: String, expression: String, args: Array[Value] (.{})) SELF {
+        this.assignments.append(column + " = " + expression)
+        this.set_args.append_many(args)
+        return this
+    }
+    /// Sets several columns of an `UPDATE`.
+    + fn set_many(values: Map[Value]) SELF {
+        each values as value, column {
+            this.set(column, value)
+        }
+        return this
+    }
+
+    /// Adds a row to an `INSERT`. Every row must have the same columns.
+    + fn values(row: Map[Value]) SELF {
+        if this.insert_rows == 0 {
+            each row as value, column {
+                this.insert_columns.append(column)
+            }
+        }
+        each this.insert_columns as column {
+            this.insert_args.append(row.get(column) !? Value.null())
+        }
+        this.insert_rows++
+        return this
+    }
+
+    /// Adds a `GROUP BY`.
+    + fn group_by(columns: String) SELF {
+        this.groups = columns
+        return this
+    }
+    /// Adds a `HAVING` condition.
+    + fn having(condition: String, args: Array[Value] (.{})) SELF {
+        this.havings.append(condition)
+        this.having_args.append_many(args)
+        return this
+    }
+    /// Adds an `ORDER BY`, written as it is: `order_by("name ASC, id DESC")`.
+    + fn order_by(columns: String) SELF {
+        this.orders = columns
+        return this
+    }
+    /// Adds a `LIMIT`.
+    + fn limit(count: uint) SELF {
+        this.row_limit = count
+        return this
+    }
+    /// Adds an `OFFSET`.
+    + fn offset(count: uint) SELF {
+        this.row_offset = count
+        return this
+    }
+    /// Adds a `RETURNING`, which SQLite and Postgres have and MySQL does not.
+    + fn returning(columns: String) SELF {
+        this.returns = columns
+        return this
+    }
+
+    /// Returns the values of the statement, in the order its placeholders take them.
+    + fn args() Array[Value] {
+        let out: Array[Value] = .{}
+        out.append_many(this.insert_args)
+        out.append_many(this.set_args)
+        out.append_many(this.join_args)
+        out.append_many(this.where_args)
+        out.append_many(this.having_args)
+        return out
+    }
+
+    /// Writes the statement for `dialect`.
+    + fn to_sql(dialect: Dialect (Dialect.sqlite)) String {
+        let out = ByteBuffer.new(128)
+        let kind = this.kind
+        if kind == QUERY_SELECT {
+            out.write("SELECT ")
+            out.write(this.columns)
+            if this.table.length > 0 {
+                out.write(" FROM ")
+                out.write(this.table)
+            }
+            each this.joins as clause {
+                out.write_byte(' ')
+                out.write(clause)
+            }
+        } else if kind == QUERY_INSERT {
+            out.write("INSERT INTO ")
+            out.write(this.table)
+            out.write(" (")
+            each this.insert_columns as column, index {
+                if index > 0 : out.write(", ")
+                out.write(column)
+            }
+            out.write(") VALUES ")
+            let row: uint = 0
+            while row < this.insert_rows {
+                if row > 0 : out.write(", ")
+                out.write_byte('(')
+                out.write(placeholders(this.insert_columns.length))
+                out.write_byte(')')
+                row++
+            }
+        } else if kind == QUERY_UPDATE {
+            out.write("UPDATE ")
+            out.write(this.table)
+            out.write(" SET ")
+            each this.assignments as assignment, index {
+                if index > 0 : out.write(", ")
+                out.write(assignment)
+            }
+        } else {
+            out.write("DELETE FROM ")
+            out.write(this.table)
+        }
+
+        if this.conditions.length > 0 {
+            out.write(" WHERE ")
+            each this.conditions as condition, index {
+                if index > 0 : out.write(" AND ")
+                out.write_byte('(')
+                out.write(condition)
+                out.write_byte(')')
+            }
+        }
+        if this.groups.length > 0 {
+            out.write(" GROUP BY ")
+            out.write(this.groups)
+        }
+        if this.havings.length > 0 {
+            out.write(" HAVING ")
+            each this.havings as having, index {
+                if index > 0 : out.write(" AND ")
+                out.write_byte('(')
+                out.write(having)
+                out.write_byte(')')
+            }
+        }
+        if this.orders.length > 0 {
+            out.write(" ORDER BY ")
+            out.write(this.orders)
+        }
+        if this.row_limit > 0 {
+            out.write(" LIMIT ")
+            out.write_uint_ascii(this.row_limit)
+        }
+        if this.row_offset > 0 {
+            // Every one of these databases takes OFFSET after LIMIT, and MySQL needs a LIMIT
+            // in front of it
+            if this.row_limit == 0 && dialect == Dialect.mysql : out.write(" LIMIT 18446744073709551615")
+            out.write(" OFFSET ")
+            out.write_uint_ascii(this.row_offset)
+        }
+        if this.returns.length > 0 {
+            out.write(" RETURNING ")
+            out.write(this.returns)
+        }
+        return rewrite(out.to_string(), dialect)
+    }
+
+    /// Runs the statement and returns how many rows it changed.
+    + fn run() uint !Error {
+        let db = this.database() !>
+        return db.driver.exec(this.to_sql(db.dialect), this.args()) !>
+    }
+    /// Runs the statement and returns every row.
+    + fn all() Array[Map[Value]] !Error {
+        let db = this.database() !>
+        return rows_of(db.driver.query(this.to_sql(db.dialect), this.args()) !>) !>
+    }
+    /// Runs the statement and returns its first row, or null.
+    + fn one() ?Map[Value] !Error {
+        let db = this.database() !>
+        this.limit(1)
+        let rows = db.driver.query(this.to_sql(db.dialect), this.args()) !>
+        let row: Map[Value] = .{}
+        let found = rows.next(row) ! { rows.close() throw E }
+        rows.close()
+        if !found : return null
+        return row
+    }
+    /// Runs the statement and returns the first value of its first row.
+    + fn value() Value !Error {
+        let row = this.one() !>
+        if !isset(row) : return Value.null()
+        each row as value : return value
+        return Value.null()
+    }
+
+    fn database() Db !Error {
+        let db = this.db
+        if !isset(db) : throw .error { message: "This query is not bound to a database; use db.select(...) or query.on(db)", sql: this.to_sql() }
+        return db
+    }
+}
+
+// Reads every row of a result and closes it
+fn rows_of(rows: Rows) Array[Map[Value]] !Error {
+    let out: Array[Map[Value]] = .{}
+    while true {
+        let row: Map[Value] = .{}
+        if !(rows.next(row) ! { rows.close() throw E }) : break
+        out.append(row)
+    }
+    rows.close()
+    return out
+}
+
+/// Returns `?, ?, ?` for `count` values, to write an `IN (...)` list by hand.
++ fn placeholders(count: uint) String {
+    if count == 0 : return ""
+    let out = ByteBuffer.new(count * 3)
+    let i: uint = 0
+    while i++ < count {
+        if i > 1 : out.write(", ")
+        out.write_byte('?')
+    }
+    return out.to_string()
+}

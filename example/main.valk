@@ -1,0 +1,114 @@
+use sql
+
+// This example runs without a database: `MemoryDriver` below is a driver of about forty lines,
+// which is also what a driver package implements. With a real one the code under `main` is the
+// same, only the first line changes:
+//
+//     let db = sqlite.database(sqlite.open("app.db") !!)
+
+fn main() {
+    let db = sql.Db.new(MemoryDriver {})
+
+    // Migrations: run once, remembered by name
+    let migrator = sql.Migrator.new(db)
+    migrator.add("0001-users.sql", "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)")
+    let ran = migrator.migrate() ! panic("Migration failed: %{E.message}")
+    println("migrations run: " + ran.length)
+
+    // Writing, with the values bound
+    db.exec("INSERT INTO users (name, age) VALUES (?, ?)", .{ sql.Value.of("Ada"), sql.Value.of_int(36) }) ! panic("%{E.message}")
+    println("wrote row " + db.last_insert_id())
+
+    // Reading
+    let rows = db.all("SELECT * FROM users WHERE age > ?", .{ sql.Value.of_int(18) }) ! panic("%{E.message}")
+    each rows as row {
+        println("user: " + (row.get("name") !? sql.Value.null()).to_string())
+    }
+
+    // The builder writes the statement for whichever database is behind it
+    let query = db.select("id, name")
+    query.from("users")
+    query.where("age > ?", .{ sql.Value.of_int(18) })
+    query.order_by("name")
+    query.limit(10)
+    println("sqlite:   " + query.to_sql(sql.Dialect.sqlite))
+    println("postgres: " + query.to_sql(sql.Dialect.postgres))
+
+    // A transaction commits when the work returns and rolls back when it throws
+    db.transaction(fn(tx: sql.Db) !sql.Error {
+        tx.exec("UPDATE users SET age = age + 1") !>
+    }) ! panic("%{E.message}")
+    println("transaction done")
+
+    // Rows into a class of your own
+    let user_rows = db.all("SELECT * FROM users") ! panic("%{E.message}")
+    let users = sql.rows_to[User](user_rows) ! panic("%{E.message}")
+    each users as user : println("read " + user.name + ", age " + user.age)
+}
+
+class User {
+    name: String
+    age: int
+}
+
+// A driver that keeps rows in memory, to show what a driver has to provide
+class MemoryDriver is sql.Driver {
+    rows: Array[Map[sql.Value]] (.{})
+    next_id: int (0)
+
+    get dialect: sql.Dialect {
+        return sql.Dialect.sqlite
+    }
+
+    fn exec(statement: String, args: Array[sql.Value]) uint !sql.Error {
+        if statement.starts_with("INSERT INTO users") {
+            this.next_id++
+            let row: Map[sql.Value] = .{}
+            row.set("id", sql.Value.of_int(this.next_id))
+            row.set("name", args.get(0) !? sql.Value.null())
+            row.set("age", args.get(1) !? sql.Value.null())
+            this.rows.append(row)
+            return 1
+        }
+        if statement.starts_with("UPDATE users SET age") {
+            each this.rows as row {
+                row.set("age", sql.Value.of_int((row.get("age") !? sql.Value.null()).to_int() + 1))
+            }
+            return this.rows.length
+        }
+        // Everything else (the migrations and their bookkeeping) is accepted and forgotten
+        return 0
+    }
+
+    fn query(statement: String, args: Array[sql.Value]) sql.Rows !sql.Error {
+        if statement.starts_with("SELECT name FROM schema_migrations") : return MemoryRows { rows: .{} }
+        return MemoryRows { rows: this.rows }
+    }
+
+    fn last_insert_id() int {
+        return this.next_id
+    }
+    fn begin(immediate: bool) !sql.Error {}
+    fn commit() !sql.Error {}
+    fn rollback() !sql.Error {}
+    fn ping() bool {
+        return true
+    }
+    fn close() {}
+}
+
+class MemoryRows is sql.Rows {
+    rows: Array[Map[sql.Value]]
+    at: uint (0)
+
+    fn next(row: Map[sql.Value]) bool !sql.Error {
+        if this.at >= this.rows.length : return false
+        row.clear()
+        let source = this.rows.get(this.at++) !? .{}
+        each source as value, column {
+            row.set(column, value)
+        }
+        return true
+    }
+    fn close() {}
+}

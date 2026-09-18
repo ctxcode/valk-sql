@@ -1,0 +1,166 @@
+use valk.time
+
+/// One migration: a name and the statements it runs.
++ class Migration {
+    /// The name, which is also the order they run in. A timestamp in front keeps them in order,
+    /// as in `0001-users.sql` or `20260918-add-index.sql`.
+    + name: String
+    /// The statements, separated by `;`.
+    + sql: String
+}
+
+/// Runs the migrations a database still needs, and remembers which it has run.
+///
+/// The names that ran are kept in a table (`schema_migrations` by default), so running the
+/// migrator again only runs what is new. Every migration runs inside a transaction, so one that
+/// fails halfway leaves nothing behind on a database with transactional DDL (SQLite and
+/// Postgres; MySQL commits each schema change on its own).
+///
+/// ```valk
+/// let migrator = sql.Migrator.new(db)
+/// migrator.add_many(#embed_dir("migrations"))
+/// let done = migrator.migrate() ! panic("Migration failed: %{E.message}")
+/// each done as name : println("ran " + name)
+/// ```
++ class Migrator {
+    /// The database to migrate.
+    + db: Db
+    /// The table the names of the migrations that ran are kept in.
+    + table: String ("schema_migrations")
+    /// The migrations, in the order they run.
+    ~ migrations: Array[Migration] (.{})
+
+    /// Creates a migrator for a database.
+    + static fn new(db: Db, table: String ("schema_migrations")) Migrator {
+        return Migrator { db: db, table: table }
+    }
+
+    /// Adds one migration.
+    + fn add(name: String, sql: String) SELF {
+        this.migrations.append(Migration { name: name, sql: sql })
+        return this
+    }
+
+    /// Adds every file of a map of name to contents, sorted by name.
+    ///
+    /// `#embed_dir("migrations")` gives exactly that map, so the files travel inside the
+    /// program and no directory has to exist where it runs.
+    + fn add_many(files: Map[String]) SELF {
+        let names: Array[String] = .{}
+        each files as content, name {
+            names.append(name)
+        }
+        names.sort()
+        each names as name {
+            this.add(name, files.get(name) !? "")
+        }
+        return this
+    }
+
+    /// Returns the names that have run, oldest first.
+    + fn applied() Array[String] !Error {
+        this.ensure_table() !>
+        let rows = this.db.all("SELECT name FROM " + this.table + " ORDER BY name") !>
+        let names: Array[String] = .{}
+        each rows as row {
+            names.append((row.get("name") !? Value.null()).to_string())
+        }
+        return names
+    }
+
+    /// Returns the migrations that have not run yet, in the order they would run.
+    + fn pending() Array[String] !Error {
+        let done = this.applied() !>
+        let names: Array[String] = .{}
+        each this.migrations as migration {
+            if done.contains(migration.name) : continue
+            names.append(migration.name)
+        }
+        return names
+    }
+
+    /// Runs every migration that has not run yet, and returns their names.
+    ///
+    /// A migration that fails stops the run and throws; the ones before it stay applied.
+    + fn migrate() Array[String] !Error {
+        let done = this.applied() !>
+        let ran: Array[String] = .{}
+        each this.migrations as migration {
+            if done.contains(migration.name) : continue
+            this.run_one(migration) !>
+            ran.append(migration.name)
+        }
+        return ran
+    }
+
+    fn run_one(migration: Migration) !Error {
+        let db = this.db
+        db.begin() !>
+        each split_statements(migration.sql) as statement {
+            db.exec(statement) ! {
+                db.rollback() _
+                throw E { message: "Migration '" + migration.name + "' failed: " + E.message, sql: statement }
+            }
+        }
+        db.exec("INSERT INTO " + this.table + " (name, applied_at) VALUES (?, ?)", .{ Value.of(migration.name), Value.of(time.DateTime.now().to_iso8601()) }) ! {
+            db.rollback() _
+            throw E
+        }
+        db.commit() ! {
+            db.rollback() _
+            throw E
+        }
+    }
+
+    fn ensure_table() !Error {
+        this.db.exec("CREATE TABLE IF NOT EXISTS " + this.table + " (name VARCHAR(255) PRIMARY KEY, applied_at VARCHAR(40) NOT NULL)") !>
+    }
+}
+
+// `String.trim` removes copies of a whole string, so whitespace is trimmed byte by byte
+fn trim_space(text: String) String {
+    let start: uint = 0
+    let end = text.length
+    while start < end && is_space(text[start]) : start++
+    while end > start && is_space(text[end - 1]) : end--
+    return text.range(start, end - start)
+}
+
+fn is_space(ch: u8) bool {
+    return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'
+}
+
+// Splits a file into statements on `;`, keeping text in quotes and comments together
+fn split_statements(sql: String) Array[String] {
+    let out: Array[String] = .{}
+    let current = ByteBuffer.new(sql.length)
+    let i: uint = 0
+    let length = sql.length
+    while i < length {
+        let ch = sql[i++]
+        if ch == '\'' || ch == '"' {
+            current.write_byte(ch)
+            while i < length {
+                let quoted = sql[i++]
+                current.write_byte(quoted)
+                if quoted == ch : break
+            }
+            continue
+        }
+        if ch == '-' && i < length && sql[i] == '-' {
+            // Line comment
+            while i < length && sql[i] != '\n' : i++
+            continue
+        }
+        if ch == ';' {
+            let statement = trim_space(current.to_string())
+            if statement.length > 0 : out.append(statement)
+            current.clear()
+            continue
+        }
+        current.write_byte(ch)
+    }
+    let last = trim_space(current.to_string())
+    if last.length > 0 : out.append(last)
+    return out
+}

@@ -1,0 +1,81 @@
+use sql
+use valk.time
+
+test "Pool" {
+    let opened: Array[FakeDriver] = .{}
+    let pool = sql.Pool.new(fn() sql.Db !sql.Error {
+        let driver = fake()
+        opened.append(driver)
+        return fake_db(driver)
+    }, 3, 2)
+
+    let first = pool.get() ! { assert(false) return }
+    assert(pool.size == 1)
+    assert(pool.in_use == 1)
+    assert(opened.length == 1)
+    pool.put(first)
+    assert(pool.in_use == 0)
+
+    // The idle connection comes back out instead of a new one
+    let again = pool.get() ! { assert(false) return }
+    assert(opened.length == 1)
+    pool.put(again)
+
+    // Three at once open three, and the third given back is closed by max_idle
+    let a = pool.get() ! { assert(false) return }
+    let b = pool.get() ! { assert(false) return }
+    let c = pool.get() ! { assert(false) return }
+    assert(pool.size == 3)
+    assert(opened.length == 3)
+    pool.put(a)
+    pool.put(b)
+    pool.put(c)
+    assert(pool.size == 2)
+
+    pool.close_idle()
+    assert(pool.size == 0)
+}
+
+test "Pool limit and waiting" {
+    let pool = sql.Pool.new(fn() sql.Db !sql.Error {
+        return fake_db(fake())
+    }, 1, 1)
+    pool.wait_timeout_ms = 200
+
+    let held = pool.get() ! { assert(false) return }
+    // Nothing comes back, so the wait ends with a timeout
+    pool.get() ! {
+        assert(error_is(E.code, timeout))
+
+        // Another coroutine giving one back lets the next get through
+        pool.wait_timeout_ms = 3000
+        let giving_back = co give_back(pool, held)
+        let second = pool.get() ! { println(E.message) assert(false) return }
+        assert(second.ping())
+        await giving_back
+        pool.put(second)
+        pool.close_idle()
+        return
+    }
+    assert(false)
+}
+
+fn give_back(pool: sql.Pool, db: sql.Db) {
+    time.sleep_ms(50)
+    pool.put(db)
+}
+
+test "Pool reports an opener that fails" {
+    let pool = sql.Pool.new(fn() sql.Db !sql.Error {
+        throw .connect { message: "no database here" }
+    }, 2, 2)
+
+    pool.get() ! {
+        assert(error_is(E.code, connect))
+        assert(E.message == "no database here")
+        // The failed attempt does not count against the pool
+        assert(pool.size == 0)
+        return
+    }
+    assert(false)
+}

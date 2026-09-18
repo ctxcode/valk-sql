@@ -1,0 +1,158 @@
+use sql
+
+test "Building selects" {
+    let driver = fake()
+    let db = fake_db(driver)
+
+    // A chain has to stay on one line, so a query with many parts is built statement by
+    // statement; every method returns the query itself either way
+    let query = db.select("id, name")
+    query.from("users")
+    query.where("age > ?", .{ sql.Value.of_int(18) })
+    query.where("active = ?", .{ sql.Value.of_bool(true) })
+    query.order_by("name ASC")
+    query.limit(10)
+    query.offset(20)
+    assert(query.to_sql() == "SELECT id, name FROM users WHERE (age > ?) AND (active = ?) ORDER BY name ASC LIMIT 10 OFFSET 20")
+    let args = query.args()
+    assert(args.length == 2)
+    assert((args.get(0) !? sql.Value.null()).to_int() == 18)
+    assert((args.get(1) !? sql.Value.null()).to_int() == 1)
+
+    // The same query, written for Postgres
+    assert(query.to_sql(sql.Dialect.postgres) == "SELECT id, name FROM users WHERE (age > $1) AND (active = $2) ORDER BY name ASC LIMIT 10 OFFSET 20")
+
+    // Joins, groups and having
+    let report = sql.Query.select("users.name, count(posts.id) AS posts")
+    report.from("users")
+    report.join("LEFT JOIN posts ON posts.user_id = users.id")
+    report.where("users.active = ?", .{ sql.Value.of_bool(true) })
+    report.group_by("users.id")
+    report.having("count(posts.id) > ?", .{ sql.Value.of_int(2) })
+    report.order_by("posts DESC")
+    assert(report.to_sql() == "SELECT users.name, count(posts.id) AS posts FROM users LEFT JOIN posts ON posts.user_id = users.id WHERE (users.active = ?) GROUP BY users.id HAVING (count(posts.id) > ?) ORDER BY posts DESC")
+    // The values come out in the order the placeholders take them: joins, where, having
+    let report_args = report.args()
+    assert(report_args.length == 2)
+    assert((report_args.get(1) !? sql.Value.null()).to_int() == 2)
+
+    // IN lists get one placeholder per value
+    let in_query = sql.Query.select().from("users").where_in("id", .{ sql.Value.of_int(1), sql.Value.of_int(2), sql.Value.of_int(3) })
+    assert(in_query.to_sql() == "SELECT * FROM users WHERE (id IN (?, ?, ?))")
+    assert(in_query.args().length == 3)
+    // An empty list matches nothing rather than writing invalid SQL
+    assert(sql.Query.select().from("users").where_in("id", .{}).to_sql() == "SELECT * FROM users WHERE (1 = 0)")
+
+    // NULL checks
+    assert(sql.Query.select().from("t").where_null("a").where_not_null("b").to_sql() == "SELECT * FROM t WHERE (a IS NULL) AND (b IS NOT NULL)")
+}
+
+test "Building writes" {
+    let insert = sql.Query.insert_into("users").values(.{ "name" => sql.Value.of("Ada"), "age" => sql.Value.of_int(36) })
+    let insert_sql = insert.to_sql()
+    // A map keeps no order, so check the shape rather than the column order
+    assert(insert_sql.starts_with("INSERT INTO users ("))
+    assert(insert_sql.contains("VALUES (?, ?)"))
+    assert(insert.args().length == 2)
+
+    // Several rows at once
+    let many = sql.Query.insert_into("t")
+    many.values(.{ "a" => sql.Value.of_int(1) })
+    many.values(.{ "a" => sql.Value.of_int(2) })
+    assert(many.to_sql() == "INSERT INTO t (a) VALUES (?), (?)")
+    assert(many.args().length == 2)
+
+    // RETURNING, which SQLite and Postgres have
+    assert(sql.Query.insert_into("t").values(.{ "a" => sql.Value.of_int(1) }).returning("id").to_sql() == "INSERT INTO t (a) VALUES (?) RETURNING id")
+
+    let update = sql.Query.update("users")
+    update.set("name", sql.Value.of("Bob"))
+    update.set_expression("visits", "visits + ?", .{ sql.Value.of_int(1) })
+    update.where("id = ?", .{ sql.Value.of_int(7) })
+    assert(update.to_sql() == "UPDATE users SET name = ?, visits = visits + ? WHERE (id = ?)")
+    let update_args = update.args()
+    assert(update_args.length == 3)
+    // The SET values come before the WHERE values, as the statement reads them
+    assert((update_args.get(0) !? sql.Value.null()).to_string() == "Bob")
+    assert((update_args.get(2) !? sql.Value.null()).to_int() == 7)
+
+    let delete = sql.Query.delete_from("users").where("id = ?", .{ sql.Value.of_int(3) })
+    assert(delete.to_sql() == "DELETE FROM users WHERE (id = ?)")
+}
+
+test "Running a built query" {
+    let driver = fake()
+    let db = fake_db(driver)
+    driver.answer = .{ row(.{ "id" => sql.Value.of_int(4), "name" => sql.Value.of("Ada") }) }
+
+    let rows = db.select().from("users").where("id = ?", .{ sql.Value.of_int(4) }).all() ! {
+        assert(false)
+        return
+    }
+    assert(rows.length == 1)
+    assert((driver.statements.get(0) !? "") == "SELECT * FROM users WHERE (id = ?)")
+    assert((driver.statement_args.get(0) !? .{}).length == 1)
+
+    // one() asks for a single row
+    let one = db.select().from("users").where("id = ?", .{ sql.Value.of_int(4) }).one() ! { assert(false) return }
+    assert(isset(one))
+    assert((driver.statements.get(1) !? "").ends_with("LIMIT 1"))
+
+    // value() reads the first column
+    driver.answer = .{ row(.{ "total" => sql.Value.of_int(12) }) }
+    assert((db.select("count(*) AS total").from("users").value() ! { assert(false) return }).to_int() == 12)
+
+    // run() is for writes
+    driver.affected = 3
+    let changed = db.update("users").set("active", sql.Value.of_bool(false)).where("age < ?", .{ sql.Value.of_int(18) }).run() ! {
+        assert(false)
+        return
+    }
+    assert(changed == 3)
+
+    // A query that was never bound to a database says so
+    sql.Query.select().from("t").all() ! {
+        assert(error_is(E.code, error))
+        assert(E.message.contains("not bound"))
+        return
+    }
+    assert(false)
+}
+
+class TestUser {
+    id: uint
+    name: String
+    nickname: ?String
+    active: bool (false)
+}
+
+test "Rows into classes" {
+    let driver = fake()
+    let db = fake_db(driver)
+    driver.answer = .{
+        row(.{ "id" => sql.Value.of_int(1), "name" => sql.Value.of("Ada"), "nickname" => sql.Value.null(), "active" => sql.Value.of_bool(true) })
+        row(.{ "id" => sql.Value.of_int(2), "name" => sql.Value.of("Bob"), "nickname" => sql.Value.of("bobby"), "active" => sql.Value.of_bool(false) })
+    }
+
+    let rows = db.all("SELECT * FROM users") ! { assert(false) return }
+    let users = sql.rows_to[TestUser](rows) ! { println(E.message) assert(false) return }
+    assert(users.length == 2)
+    let first = users.get(0) ! { assert(false) return }
+    assert(first.id == 1)
+    assert(first.name == "Ada")
+    assert(!isset(first.nickname))
+    assert(first.active)
+    let second = users.get(1) ! { assert(false) return }
+    assert((second.nickname ?? "") == "bobby")
+    assert(!second.active)
+
+    // A row that does not fit says which type it did not fit
+    let wrong = row(.{ "id" => sql.Value.of_int(1) })
+    sql.row_to[TestUser](wrong) ! {
+        assert(error_is(E.code, error))
+        assert(E.message.contains("does not fit"))
+        assert(E.message.contains("id"))
+        return
+    }
+    assert(false)
+}

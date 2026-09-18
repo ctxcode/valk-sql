@@ -1,0 +1,184 @@
+use valk.json
+
+/// What a value holds. Every database this package speaks to has these five.
++ enum TYPE {
+    null
+    /// A real boolean, which Postgres has and SQLite and MySQL do not: those store 1 and 0, and
+    /// their drivers report `int`.
+    bool
+    int
+    float
+    text
+    blob
+}
+
+/// One value: a cell of a row, or an argument of a statement.
+///
+/// This is a struct, so a row of values costs one allocation rather than one per column.
++ struct Value {
+    /// Which of the kinds this value is.
+    + type: TYPE
+    + int_value: int (0)
+    + float_value: float (0)
+    + bool_value: bool (false)
+    /// The bytes of a text or blob value.
+    + text: String ("")
+
+    /// Returns a NULL value.
+    + static fn null() SELF $default {
+        return SELF { type: TYPE.null }
+    }
+    /// Returns a text value.
+    + static fn of(text: String ("")) SELF {
+        return SELF { type: TYPE.text, text: text }
+    }
+    /// Returns an integer value.
+    + static fn of_int(number: int (0)) SELF {
+        return SELF { type: TYPE.int, int_value: number }
+    }
+    /// Returns a floating point value.
+    + static fn of_float(number: float (0)) SELF {
+        return SELF { type: TYPE.float, float_value: number }
+    }
+    /// Returns a bool value. A driver whose database has no boolean type sends it as 1 or 0.
+    + static fn of_bool(value: bool (false)) SELF {
+        return SELF { type: TYPE.bool, bool_value: value }
+    }
+    /// Returns a blob value; the bytes are stored as they are.
+    + static fn of_blob(data: String ("")) SELF {
+        return SELF { type: TYPE.blob, text: data }
+    }
+
+    /// Returns whether the value is NULL.
+    + fn is_null() bool {
+        return this.type == TYPE.null
+    }
+    /// Returns whether the value is a real boolean, which only Postgres reports.
+    + fn is_bool() bool {
+        return this.type == TYPE.bool
+    }
+    /// Returns whether the value is a blob.
+    + fn is_blob() bool {
+        return this.type == TYPE.blob
+    }
+
+    /// Returns the value as text; numbers are formatted and NULL becomes "".
+    + fn to_string() String $auto {
+        let type = this.type
+        if type == TYPE.text || type == TYPE.blob : return this.text
+        if type == TYPE.int : return this.int_value.to(String)
+        if type == TYPE.float : return this.float_value.to_shortest_string()
+        if type == TYPE.bool : return this.bool_value ? "1" : "0"
+        return ""
+    }
+    /// Like `to_string`, but null for NULL, which tells an empty value apart from a missing one.
+    + fn to_string_or_null() ?String {
+        if this.type == TYPE.null : return null
+        return this.to_string()
+    }
+    /// Returns the value as an integer; text is parsed, floats are truncated, NULL is 0.
+    + fn to_int() int {
+        let type = this.type
+        if type == TYPE.int : return this.int_value
+        if type == TYPE.bool : return this.bool_value ? 1 : 0
+        if type == TYPE.float : return this.float_value.to(int)
+        if type == TYPE.text || type == TYPE.blob {
+            return this.text.to_int() !? (this.text.to_float() !? 0).to(int)
+        }
+        return 0
+    }
+    /// Returns the value as an unsigned integer; negative numbers become 0.
+    + fn to_uint() uint {
+        let value = this.to_int()
+        if value < 0 : return 0
+        return value.to(uint)
+    }
+    /// Returns the value as a float; text is parsed, NULL is 0.
+    + fn to_float() float {
+        let type = this.type
+        if type == TYPE.float : return this.float_value
+        if type == TYPE.int : return this.int_value
+        if type == TYPE.bool : return this.bool_value ? 1 : 0
+        if type == TYPE.text || type == TYPE.blob : return this.text.to_float() !? 0
+        return 0
+    }
+    /// Returns the value as a bool: any number other than 0, and the texts `1`, `t`, `true`,
+    /// `yes` and `on`.
+    + fn to_bool() bool {
+        let type = this.type
+        if type == TYPE.bool : return this.bool_value
+        if type == TYPE.int : return this.int_value != 0
+        if type == TYPE.float : return this.float_value != 0
+        if type == TYPE.text {
+            let text = this.text
+            return text == "1" || text == "t" || text == "true" || text == "yes" || text == "on"
+        }
+        return false
+    }
+    /// Parses the value as JSON. Returns json null when the text is not valid JSON.
+    + fn to_json() json.Value {
+        let type = this.type
+        if type == TYPE.bool : return json.new_bool(this.bool_value)
+        if type == TYPE.int : return json.new_int(this.int_value)
+        if type == TYPE.float : return json.new_float(this.float_value)
+        if type == TYPE.null : return json.new_null()
+        return json.decode(this.to_string()) !? json.new_null()
+    }
+}
+
+extend bool {
+    + fn to_sql_value() Value $auto {
+        return Value.of_bool(this)
+    }
+}
+extend int {
+    + fn to_sql_value() Value $auto {
+        return Value.of_int(this)
+    }
+}
+extend uint {
+    + fn to_sql_value() Value $auto {
+        return Value.of_int(this.to(int))
+    }
+}
+extend float {
+    + fn to_sql_value() Value $auto {
+        return Value.of_float(this)
+    }
+}
+extend String {
+    + fn to_sql_value() Value $auto {
+        return Value.of(this)
+    }
+}
+extend json.Value {
+    + fn to_sql_value() Value $auto {
+        return Value.of(this.encode())
+    }
+}
+
+/// Converts any supported value (integers, floats, bools, text, json values, and nullable
+/// versions of those) into a `Value`.
++ fn convert(ndata: $T) Value {
+    #if T.$is_nullable
+    if !isset(ndata) : return Value.null()
+    #end
+
+    let data = ndata
+
+    #if T.$is_type_of(Value)
+    return data
+    #elif T.$can_convert_to(Value)
+    return data.to(Value)
+    #elif T.$has_method(to_sql_value)
+    return data.to_sql_value()
+    #elif T.$is_bool
+    return Value.of_bool(data)
+    #elif T.$is_integer
+    return Value.of_int(data.to(int))
+    #elif T.$is_float
+    return Value.of_float(data.to(float))
+    #else
+    #error "Cannot convert this value to a sql Value"
+    #end
+}

@@ -1,0 +1,96 @@
+use sql
+
+// A driver that keeps everything in memory, so the tests of this package need no database. It
+// answers `SELECT` with the rows it was given and records every statement it was asked to run.
+class FakeDriver is sql.Driver {
+    + dialect_kind: sql.Dialect (sql.Dialect.sqlite)
+    /// Every statement that ran, in order
+    + statements: Array[String] (.{})
+    /// The values of every statement that ran
+    + statement_args: Array[Array[sql.Value]] (.{})
+    /// What the next query answers with
+    + answer: Array[Map[sql.Value]] (.{})
+    + affected: uint (1)
+    + insert_id: int (0)
+    + fail_with: String ("")
+    /// Only fail a statement that contains this text; empty fails the next statement
+    + fail_when: String ("")
+    + closed: bool (false)
+    + transactions: Array[String] (.{})
+
+    get dialect: sql.Dialect {
+        return this.dialect_kind
+    }
+
+    fn exec(statement: String, args: Array[sql.Value]) uint !sql.Error {
+        this.record(statement, args) !>
+        return this.affected
+    }
+
+    fn query(statement: String, args: Array[sql.Value]) sql.Rows !sql.Error {
+        this.record(statement, args) !>
+        return FakeRows { rows: this.answer }
+    }
+
+    fn record(statement: String, args: Array[sql.Value]) !sql.Error {
+        if this.closed : throw .closed { message: "closed" }
+        this.statements.append(statement)
+        this.statement_args.append(args)
+        if this.fail_with.length > 0 {
+            if this.fail_when.length > 0 && !statement.contains(this.fail_when) : return
+            let message = this.fail_with
+            this.fail_with = ""
+            throw .constraint { message: message, sql: statement }
+        }
+    }
+
+    fn last_insert_id() int {
+        return this.insert_id
+    }
+    fn begin(immediate: bool) !sql.Error {
+        this.transactions.append(immediate ? "begin immediate" : "begin")
+    }
+    fn commit() !sql.Error {
+        this.transactions.append("commit")
+    }
+    fn rollback() !sql.Error {
+        this.transactions.append("rollback")
+    }
+    fn ping() bool {
+        return !this.closed
+    }
+    fn close() {
+        this.closed = true
+    }
+}
+
+class FakeRows is sql.Rows {
+    rows: Array[Map[sql.Value]]
+    at: uint (0)
+    + closed: bool (false)
+
+    fn next(row: Map[sql.Value]) bool !sql.Error {
+        if this.at >= this.rows.length : return false
+        row.clear()
+        let source = this.rows.get(this.at++) !? .{}
+        each source as value, column {
+            row.set(column, value)
+        }
+        return true
+    }
+    fn close() {
+        this.closed = true
+    }
+}
+
+fn fake() FakeDriver {
+    return FakeDriver {}
+}
+
+fn fake_db(driver: FakeDriver) sql.Db {
+    return sql.Db.new(driver)
+}
+
+fn row(values: Map[sql.Value]) Map[sql.Value] {
+    return values
+}

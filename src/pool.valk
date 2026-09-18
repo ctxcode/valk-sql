@@ -1,0 +1,111 @@
+use valk.time
+
+/// A set of connections that are opened once and handed out as they are needed.
+///
+/// A pool belongs to one thread, like the connections in it: a server that answers requests on
+/// several worker threads gives every thread its own through a `global`, since every thread
+/// runs the global initializers.
+///
+/// ```valk
+/// global pool: sql.Pool (sql.Pool.new(fn() sql.Db !sql.Error {
+///     return sqlite.database(sqlite.open("app.db") ! throw .connect { message: E.message })
+/// }, 8))
+///
+/// fn handler(req: http.Request) http.Response {
+///     let db = pool.get() ! return http.Response.text("database down", 503)
+///     defer pool.put(db)
+///     ...
+/// }
+/// ```
++ class Pool {
+    /// Opens a new connection. The pool calls it whenever it needs one.
+    + open: fn()(Db !Error)
+    /// The greatest number of connections that may exist at one time, idle and handed out
+    /// together. 0 is no limit.
+    + max_connections: uint (8)
+    /// How many idle connections are kept. Connections given back beyond this are closed.
+    + max_idle: uint (4)
+    /// How long `get` waits for a connection to come back when the pool is at its limit, in
+    /// milliseconds. It throws `timeout` after that; 0 waits forever.
+    + wait_timeout_ms: uint (5000)
+    /// Whether `get` checks an idle connection before handing it out, which costs a round trip
+    /// and catches a connection the database dropped in the meantime.
+    + check_on_get: bool (false)
+    idle: Array[Db] (.{})
+    /// How many connections the pool has: idle plus handed out.
+    ~ size: uint (0)
+    /// How many connections are handed out at this moment.
+    ~ in_use: uint (0)
+
+    /// Creates a pool. No connection is opened until the first `get`.
+    + static fn new(open: fn()(Db !Error), max_connections: uint (8), max_idle: uint (4)) Pool {
+        return Pool {
+            open: open
+            max_connections: max_connections
+            max_idle: max_idle
+        }
+    }
+
+    /// Takes a connection out of the pool, opening one when none is idle.
+    ///
+    /// Waits when the pool is at `max_connections` and every connection is handed out, and
+    /// throws `timeout` when none comes back in time. Give it back with `put`, which belongs in
+    /// a `defer` right after the `get`.
+    + fn get() Db !Error {
+        let deadline: uint = 0
+        if this.wait_timeout_ms > 0 : deadline = time.mono_us() + this.wait_timeout_ms * 1000
+        while true {
+            while this.idle.length > 0 {
+                let db = this.idle.pop_last() ! break
+                if this.check_on_get && !db.ping() {
+                    db.close()
+                    this.drop()
+                    continue
+                }
+                this.in_use++
+                return db
+            }
+
+            if this.max_connections == 0 || this.size < this.max_connections {
+                // Counted before opening, so that concurrent coroutines do not all open one
+                this.size++
+                let db = this.open() ! {
+                    this.drop()
+                    throw E
+                }
+                this.in_use++
+                return db
+            }
+
+            if deadline > 0 && time.mono_us() >= deadline {
+                throw .timeout { message: "No connection came back within %{this.wait_timeout_ms}ms" }
+            }
+            // Waiting yields to the other coroutines on this thread
+            time.sleep_ms(1)
+        }
+    }
+
+    /// Gives a connection back. One beyond `max_idle` is closed instead of kept.
+    + fn put(db: Db) {
+        if this.in_use > 0 : this.in_use--
+        if this.idle.length >= this.max_idle {
+            db.close()
+            this.drop()
+            return
+        }
+        this.idle.append(db)
+    }
+
+    /// Closes every idle connection. Connections that are handed out are left alone.
+    + fn close_idle() {
+        each this.idle as db {
+            db.close()
+            this.drop()
+        }
+        this.idle.clear()
+    }
+
+    fn drop() {
+        if this.size > 0 : this.size--
+    }
+}

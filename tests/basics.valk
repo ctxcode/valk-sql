@@ -1,0 +1,116 @@
+use sql
+
+test "Running statements" {
+    let driver = fake()
+    let db = fake_db(driver)
+    assert(db.dialect == sql.Dialect.sqlite)
+
+    // Values travel next to the statement, never inside it
+    let changed = db.exec("INSERT INTO users (name, age) VALUES (?, ?)", .{ sql.Value.of("Ada"), sql.Value.of_int(36) }) ! {
+        assert(false)
+        return
+    }
+    assert(changed == 1)
+    assert((driver.statements.get(0) !? "") == "INSERT INTO users (name, age) VALUES (?, ?)")
+    let args = driver.statement_args.get(0) !? .{}
+    assert(args.length == 2)
+    assert((args.get(0) !? sql.Value.null()).to_string() == "Ada")
+    assert((args.get(1) !? sql.Value.null()).to_int() == 36)
+
+    // Rows come back as maps of values
+    driver.answer = .{
+        row(.{ "id" => sql.Value.of_int(1), "name" => sql.Value.of("Ada") })
+        row(.{ "id" => sql.Value.of_int(2), "name" => sql.Value.of("Bob") })
+    }
+    let rows = db.all("SELECT * FROM users") ! { assert(false) return }
+    assert(rows.length == 2)
+    assert(((rows.get(1) !? .{}).get("name") !? sql.Value.null()).to_string() == "Bob")
+
+    // One row, or none
+    let first = db.one("SELECT * FROM users") ! { assert(false) return }
+    assert(isset(first))
+    if isset(first) : assert((first.get("id") !? sql.Value.null()).to_int() == 1)
+    driver.answer = .{}
+    assert(!isset(db.one("SELECT * FROM users") ! { assert(false) return }))
+
+    // One value
+    driver.answer = .{ row(.{ "count" => sql.Value.of_int(7) }) }
+    assert((db.value("SELECT count(*) FROM users") ! { assert(false) return }).to_int() == 7)
+    driver.answer = .{}
+    assert((db.value("SELECT count(*) FROM users") ! { assert(false) return }).is_null())
+
+    assert(db.ping())
+    db.close()
+    assert(driver.closed)
+}
+
+test "Placeholders are rewritten per database" {
+    // SQLite and MySQL take `?` as it is
+    assert(sql.rewrite("SELECT * FROM t WHERE a = ? AND b = ?", sql.Dialect.sqlite) == "SELECT * FROM t WHERE a = ? AND b = ?")
+    assert(sql.rewrite("SELECT * FROM t WHERE a = ?", sql.Dialect.mysql) == "SELECT * FROM t WHERE a = ?")
+
+    // Postgres numbers them
+    assert(sql.rewrite("SELECT * FROM t WHERE a = ? AND b = ?", sql.Dialect.postgres) == "SELECT * FROM t WHERE a = $1 AND b = $2")
+
+    // A `?` inside text is not a placeholder
+    assert(sql.rewrite("SELECT '? ?' , a FROM t WHERE b = ?", sql.Dialect.postgres) == "SELECT '? ?' , a FROM t WHERE b = $1")
+    assert(sql.rewrite("SELECT \"we?ird\" FROM t WHERE b = ?", sql.Dialect.postgres) == "SELECT \"we?ird\" FROM t WHERE b = $1")
+
+    // A statement without placeholders is left alone
+    assert(sql.rewrite("SELECT 1", sql.Dialect.postgres) == "SELECT 1")
+
+    // And a query written through a Postgres database comes out numbered
+    let driver = fake()
+    driver.dialect_kind = sql.Dialect.postgres
+    let db = fake_db(driver)
+    db.exec("DELETE FROM t WHERE a = ? AND b = ?", .{ sql.Value.of_int(1), sql.Value.of_int(2) }) ! { assert(false) return }
+    assert((driver.statements.get(0) !? "") == "DELETE FROM t WHERE a = $1 AND b = $2")
+}
+
+test "Transactions" {
+    let driver = fake()
+    let db = fake_db(driver)
+
+    // A transaction that returns commits
+    db.transaction(fn(tx: sql.Db) !sql.Error {
+        tx.exec("UPDATE accounts SET balance = balance - 10") !>
+    }) ! { assert(false) return }
+    assert(driver.transactions.length == 2)
+    assert((driver.transactions.get(0) !? "") == "begin")
+    assert((driver.transactions.get(1) !? "") == "commit")
+
+    // One that throws rolls back, and the error reaches the caller
+    driver.fail_with = "unique constraint"
+    db.transaction(fn(tx: sql.Db) !sql.Error {
+        tx.exec("INSERT INTO accounts VALUES (1)") !>
+    }) ! {
+        assert(error_is(E.code, constraint))
+        assert((driver.transactions.get(3) !? "") == "rollback")
+        assert(driver.transactions.length == 4)
+        return
+    }
+    assert(false)
+}
+
+test "Values" {
+    assert(sql.Value.of("text").to_string() == "text")
+    assert(sql.Value.of_int(-3).to_int() == -3)
+    assert(sql.Value.of_int(-3).to_uint() == 0)
+    assert(sql.Value.of_int(42).to_string() == "42")
+    assert(sql.Value.of_float(1.5).to_float() == 1.5)
+    assert(sql.Value.of_bool(true).to_int() == 1)
+    assert(sql.Value.of_bool(false).to_bool() == false)
+    assert(sql.Value.null().is_null())
+    assert(!isset(sql.Value.null().to_string_or_null()))
+    assert(sql.Value.of_blob("\x00\x01").is_blob())
+    assert(sql.Value.of_blob("\x00\x01").to_string().length == 2)
+    assert(sql.Value.of("{\"a\":1}").to_json()["a"].int == 1)
+
+    // Ordinary valk values convert
+    assert(sql.convert(7).to_int() == 7)
+    assert(sql.convert("x").to_string() == "x")
+    assert(sql.convert(true).to_bool())
+    assert(sql.convert(1.25).to_float() == 1.25)
+    let missing: ?String = null
+    assert(sql.convert(missing).is_null())
+}

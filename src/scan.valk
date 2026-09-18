@@ -1,0 +1,79 @@
+use valk.json
+
+/// Reads a row into a class or struct of your own.
+///
+/// Every field of `T` must be a column of the row, unless the field is nullable or has a
+/// default. Fields are matched by name: a text column reaches a `String` field and a number
+/// column an `int` or a `float` field.
+///
+/// SQLite and MySQL have no boolean type and store 1 and 0, which cannot be told from any other
+/// number, so name those columns in `bool_columns` to read them into a `bool` field. A Postgres
+/// boolean needs no help.
+///
+/// This goes through the JSON decoder, so it is for readable code rather than for the hottest
+/// loop; reading the columns by hand stays available.
+///
+/// ```valk
+/// class User {
+///     id: uint
+///     name: String
+///     nickname: ?String
+/// }
+///
+/// let row = db.one("SELECT * FROM users WHERE id = ?", .{ 1 }) ! panic("%{E.message}")
+/// if isset(row) {
+///     let user = sql.row_to[User](row) ! panic("%{E.message}")
+///     println(user.name)
+/// }
+/// ```
++ fn row_to[T](row: Map[Value], bool_columns: Array[String] (.{})) T !Error {
+    let document: json.Value = json.new_object(row_to_json(row, bool_columns))
+    return document.to_type[T]() ! {
+        // The JSON decoder reports a LookupError, which carries no message of its own
+        throw .error { message: "This row does not fit the type it was read into; its columns were: " + column_names(row) }
+    }
+}
+
+/// Reads every row into a class or struct of your own, as `row_to` does for one.
++ fn rows_to[T](rows: Array[Map[Value]], bool_columns: Array[String] (.{})) Array[T] !Error {
+    let out = Array[T].new(rows.length)
+    each rows as row {
+        out.append(row_to[T](row, bool_columns) !>)
+    }
+    return out
+}
+
+/// Returns the row as a JSON object, for an answer that goes straight out as JSON.
++ fn row_to_json_value(row: Map[Value], bool_columns: Array[String] (.{})) json.Value {
+    let document: json.Value = json.new_object(row_to_json(row, bool_columns))
+    return document
+}
+
+fn column_names(row: Map[Value]) String {
+    let names: Array[String] = .{}
+    each row as value, column {
+        names.append(column)
+    }
+    return names.join(", ")
+}
+
+fn row_to_json(row: Map[Value], bool_columns: Array[String]) Map[json.Value] {
+    let values: Map[json.Value] = .{}
+    each row as value, column {
+        if bool_columns.length > 0 && bool_columns.contains(column) {
+            values.set(column, json.new_bool(value.to_bool()))
+            continue
+        }
+        values.set(column, value_to_json(value))
+    }
+    return values
+}
+
+fn value_to_json(value: Value) json.Value {
+    let type = value.type
+    if type == TYPE.null : return json.new_null()
+    if type == TYPE.bool : return json.new_bool(value.bool_value)
+    if type == TYPE.int : return json.new_int(value.int_value)
+    if type == TYPE.float : return json.new_float(value.float_value)
+    return json.new_string(value.text)
+}

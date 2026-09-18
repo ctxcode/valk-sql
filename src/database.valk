@@ -1,0 +1,210 @@
+/// Which database is on the other end, and so how a statement is written.
++ enum Dialect {
+    sqlite
+    mysql
+    postgres
+}
+
+/// What a driver has to provide. The driver packages implement this; a program uses `Db`.
++ interface Driver {
+    /// Which database this is.
+    get dialect: Dialect;
+    /// Runs a statement that reads no rows and returns how many rows it changed.
+    fn exec(sql: String, args: Array[Value]) uint !Error;
+    /// Runs a statement and returns its rows.
+    fn query(sql: String, args: Array[Value]) Rows !Error;
+    /// The id the last insert wrote, where the database has one.
+    fn last_insert_id() int;
+    /// Opens a transaction; `immediate` takes the write lock at once where that exists.
+    fn begin(immediate: bool) !Error;
+    fn commit() !Error;
+    fn rollback() !Error;
+    /// Returns whether the connection still answers.
+    fn ping() bool;
+    /// Closes the connection.
+    fn close();
+}
+
+/// The rows of one query, read one at a time.
++ interface Rows {
+    /// Reads the next row into `row` and returns whether there was one. The map is cleared
+    /// first, so one map can serve a whole result.
+    fn next(row: Map[Value]) bool !Error;
+    /// Releases what the query still holds. Reading to the end does this as well.
+    fn close();
+}
+
+/// A database, whichever driver is behind it.
+///
+/// A driver package hands one of these out (`sqlite.database(con)`, `postgres.database(con)`,
+/// `mysql.database(con)`), and everything in this package works with it. Statements are written
+/// with `?` placeholders whatever the database is; the values are bound, never pasted in.
+///
+/// ```valk
+/// let db = sqlite.database(con)
+/// db.exec("INSERT INTO users (name, age) VALUES (?, ?)", .{ "Ada", 36 }) ! panic("%{E.message}")
+/// let rows = db.all("SELECT * FROM users WHERE age > ?", .{ 18 }) ! panic("%{E.message}")
+/// ```
++ class Db {
+    /// The driver behind this database.
+    + driver: Driver
+
+    /// Wraps a driver. Drivers call this; a program calls the driver's own function.
+    + static fn new(driver: Driver) Db {
+        return Db { driver: driver }
+    }
+
+    /// Which database is on the other end.
+    + get dialect: Dialect {
+        return this.driver.dialect
+    }
+
+    /// Runs a statement that reads no rows, and returns how many rows it changed.
+    + fn exec(sql: String, args: Array[Value] (.{})) uint !Error {
+        return this.driver.exec(rewrite(sql, this.driver.dialect), args) !>
+    }
+
+    /// Runs a statement and returns its rows, to be read one at a time with `Rows.next`.
+    + fn query(sql: String, args: Array[Value] (.{})) Rows !Error {
+        return this.driver.query(rewrite(sql, this.driver.dialect), args) !>
+    }
+
+    /// Runs a statement and returns every row it answered with.
+    + fn all(sql: String, args: Array[Value] (.{})) Array[Map[Value]] !Error {
+        let rows = this.query(sql, args) !>
+        let out: Array[Map[Value]] = .{}
+        while true {
+            let row: Map[Value] = .{}
+            if !(rows.next(row) ! { rows.close() throw E }) : break
+            out.append(row)
+        }
+        rows.close()
+        return out
+    }
+
+    /// Runs a statement and returns its first row, or null when it answered with none.
+    + fn one(sql: String, args: Array[Value] (.{})) ?Map[Value] !Error {
+        let rows = this.query(sql, args) !>
+        let row: Map[Value] = .{}
+        let found = rows.next(row) ! { rows.close() throw E }
+        rows.close()
+        if !found : return null
+        return row
+    }
+
+    /// Runs a statement that answers with one value, and returns it. NULL when there is no row.
+    ///
+    /// ```valk
+    /// let total = (db.value("SELECT count(*) FROM users") ! panic("%{E.message}")).to_int()
+    /// ```
+    + fn value(sql: String, args: Array[Value] (.{})) Value !Error {
+        let row = this.one(sql, args) !>
+        if !isset(row) : return Value.null()
+        each row as value : return value
+        return Value.null()
+    }
+
+    /// The id the last insert wrote. SQLite and MySQL fill this in; Postgres has no such
+    /// counter, so ask it for the id with `INSERT ... RETURNING id` instead.
+    + fn last_insert_id() int {
+        return this.driver.last_insert_id()
+    }
+
+    /// Opens a transaction.
+    ///
+    /// `immediate` takes the write lock at once where the database has one (SQLite), which a
+    /// transaction that reads a value and writes it back wants.
+    + fn begin(immediate: bool (false)) !Error {
+        this.driver.begin(immediate) !>
+    }
+    /// Commits the open transaction.
+    + fn commit() !Error {
+        this.driver.commit() !>
+    }
+    /// Rolls the open transaction back.
+    + fn rollback() !Error {
+        this.driver.rollback() !>
+    }
+
+    /// Runs `work` inside a transaction: it commits when the work returns, and rolls back when
+    /// it throws.
+    ///
+    /// ```valk
+    /// db.transaction(fn(tx: sql.Db) !sql.Error {
+    ///     tx.exec("UPDATE accounts SET balance = balance - ? WHERE id = ?", .{ 10, 1 }) !>
+    ///     tx.exec("UPDATE accounts SET balance = balance + ? WHERE id = ?", .{ 10, 2 }) !>
+    /// }) ! panic("%{E.message}")
+    /// ```
+    + fn transaction(work: fn(Db)(!Error), immediate: bool (false)) !Error {
+        this.begin(immediate) !>
+        work(this) ! {
+            this.rollback() _
+            throw E
+        }
+        this.commit() ! {
+            this.rollback() _
+            throw E
+        }
+    }
+
+    /// Returns whether the connection still answers.
+    + fn ping() bool {
+        return this.driver.ping()
+    }
+
+    /// Closes the connection.
+    + fn close() {
+        this.driver.close()
+    }
+
+    /// Starts a `SELECT` on this database.
+    + fn select(columns: String ("*")) Query {
+        return Query.select(columns).on(this)
+    }
+    /// Starts an `INSERT INTO` on this database.
+    + fn insert_into(table: String) Query {
+        return Query.insert_into(table).on(this)
+    }
+    /// Starts an `UPDATE` on this database.
+    + fn update(table: String) Query {
+        return Query.update(table).on(this)
+    }
+    /// Starts a `DELETE FROM` on this database.
+    + fn delete_from(table: String) Query {
+        return Query.delete_from(table).on(this)
+    }
+}
+
+/// Rewrites the `?` placeholders of a statement for `dialect`.
+///
+/// SQLite and MySQL take `?` as it is; Postgres wants `$1`, `$2`, ... Text in quotes is left
+/// alone, so a `?` inside a string stays what it was.
++ fn rewrite(sql: String, dialect: Dialect) String {
+    if dialect != Dialect.postgres : return sql
+    if !sql.contains_byte('?') : return sql
+
+    let out = ByteBuffer.new(sql.length + 8)
+    let index: uint = 0
+    let i: uint = 0
+    let length = sql.length
+    while i < length {
+        let ch = sql[i++]
+        if ch == '\'' || ch == '"' {
+            // Copy quoted text as it is; a doubled quote inside re-enters and leaves it
+            out.write_byte(ch)
+            while i < length {
+                let quoted = sql[i++]
+                out.write_byte(quoted)
+                if quoted == ch : break
+            }
+            continue
+        }
+        if ch == '?' {
+            out.write_byte('$')
+            out.write_uint_ascii(++index)
+            continue
+        }
+        out.write_byte(ch)
+    }
+    return out.to_string()
+}

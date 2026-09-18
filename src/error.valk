@@ -1,0 +1,18 @@
+/// Thrown by every operation of this package, and by the drivers behind it.
+///
+/// - `connect`: the database could not be opened or reached.
+/// - `syntax`: the statement could not be prepared: a typo, an unknown table or column.
+/// - `constraint`: a `UNIQUE`, `NOT NULL`, `CHECK` or foreign key rule was broken.
+/// - `busy`: the database was held by someone else for longer than the driver waits.
+/// - `readonly`: the database cannot be written.
+/// - `timeout`: a connection did not come back from the pool in time.
+/// - `closed`: the connection is closed.
+/// - `error`: anything else the driver reported.
+///
+/// `driver_code` holds the code the driver gave, such as a SQLSTATE (`23505`) or a SQLite
+/// result code, so a caller that needs the exact reason still has it.
++ error Error (connect, syntax, constraint, busy, readonly, timeout, closed, error) payload {
+    message: String
+    driver_code: String ("")
+    sql: String ("")
+}
