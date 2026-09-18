@@ -189,9 +189,21 @@ of this account do it for you.
 
 ## What it costs
 
-Going through this package adds one interface call per statement and one struct per column on
-top of the driver. It does not change the driver's own API, which stays available for the paths
-where every allocation counts: `sqlite.Connection` and the others work exactly as before.
+Measured against SQLite in memory, 50 000 rows, best of three (`bench/` in valk-sqlite):
+
+| | driver | through sql |
+| --- | --- | --- |
+| 50 000 inserts in one transaction | 19 ms | 12 ms |
+| reading 50 000 rows of 3 columns | 7 ms | 8 ms |
+| 50 000 single-row selects | 23 ms | 23 ms |
+
+Reading is within noise of the driver because the adapter fills the row straight from the
+statement rather than building the driver's own row first. Writing is faster here than the
+driver's named-placeholder form, which builds a map per statement. Against a database on a
+socket, all of this disappears into the round trip.
+
+The driver's own API is untouched and stays available for the paths where every allocation
+counts: `sqlite.Connection` and the others work exactly as before.
 
 ## Development
 
