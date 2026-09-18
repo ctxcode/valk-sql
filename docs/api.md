@@ -82,6 +82,8 @@ Namespaces: [main](#main)
     + fn all(sql: String, args: Array[Value] (.{})) Array[Map[Value]] !Error
     // Opens a transaction.
     + fn begin(immediate: bool (false)) void !Error
+    // Opens a transaction and hands it back, for work that does not fit in a closure.
+    + fn begin_transaction(immediate: bool (false)) Tx !Error
     // Closes the connection.
     + fn close() void
     // Commits the open transaction.
@@ -210,6 +212,8 @@ Namespaces: [main](#main)
     + fn all() Array[Map[Value]] !Error
     // Returns the values of the statement, in the order its placeholders take them.
     + fn args() Array[Value]
+    // Runs the same query as a count, without its order, limit and offset.
+    + fn count(expression: String ("*")) uint !Error
     // Starts a `DELETE FROM`.
     + static fn delete_from(table: String) Query
     // The table to read from.
@@ -220,16 +224,26 @@ Namespaces: [main](#main)
     + fn having(condition: String, args: Array[Value] (.{})) Query
     // Adds a group of `HAVING` conditions, written in brackets.
     + fn having_group(build: fn(Conditions)()) Query
+    // Adds `INNER JOIN <table> ON <condition>`.
+    + fn inner_join(table: String, condition: String, args: Array[Value] (.{})) Query
     // Starts an `INSERT INTO`.
     + static fn insert_into(table: String) Query
-    // Adds a join, written as it is: `join("JOIN posts ON posts.user_id = users.id")`.
+    // Adds a join, written as it is: `join("LEFT JOIN posts ON posts.user_id = users.id")`.
     + fn join(clause: String, args: Array[Value] (.{})) Query
+    // Adds `JOIN <table> ON <condition>`.
+    + fn join_on(table: String, condition: String, args: Array[Value] (.{})) Query
+    // Adds `LEFT JOIN <table> ON <condition>`, which keeps the rows that match nothing.
+    + fn left_join(table: String, condition: String, args: Array[Value] (.{})) Query
     // Adds a `LIMIT`.
     + fn limit(count: uint) Query
     // Adds an `OFFSET`.
     + fn offset(count: uint) Query
     // Binds the query to a database, so that it can run itself.
     + fn on(db: Db) Query
+    // On a row that clashes with one that is already there, keeps the row that is there.
+    + fn on_conflict_nothing(columns: Array[String] (.{})) Query
+    // On a row that clashes with one that is already there, writes the new values over it.
+    + fn on_conflict_update(columns: Array[String], update_columns: Array[String] (.{})) Query
     // Runs the statement and returns its first row, or null.
     + fn one() ?Map[Value] !Error
     // Adds a `HAVING` condition with `OR`.
@@ -240,6 +254,8 @@ Namespaces: [main](#main)
     + fn or_where_group(build: fn(Conditions)()) Query
     // Adds an `ORDER BY`, written as it is: `order_by("name ASC, id DESC")`.
     + fn order_by(columns: String) Query
+    // Takes one page of rows: page 1 is the first `per_page` rows, page 2 the next, and so on.
+    + fn page(number: uint, per_page: uint) Query
     // Adds a `RETURNING`, which SQLite and Postgres have and MySQL does not.
     + fn returning(columns: String) Query
     // Runs the statement and returns how many rows it changed.
@@ -282,6 +298,43 @@ Namespaces: [main](#main)
     + fn close() void
     // Reads the next row into `row` and returns whether there was one. The map is cleared first, so one map can serve a whole result.
     + fn next(row: Map[Value]) bool !Error
+}
+```
+
+```js
+// A transaction that is not held by a closure.
++ class Tx {
+    // The database this transaction runs on. Statements may go through it as well.
+    + db: Db
+    // Whether the transaction is still open: neither committed nor rolled back.
+    ~ open: bool
+
+    // Runs a statement and returns every row.
+    + fn all(sql: String, args: Array[Value] (.{})) Array[Map[Value]] !Error
+    // Rolls the work back unless it was committed. Made for `defer`, so it throws nothing.
+    + fn close() void
+    // Commits the work. The transaction is closed afterwards.
+    + fn commit() void !Error
+    // Starts a `DELETE FROM` on this transaction.
+    + fn delete_from(table: String) Query
+    // Runs a statement that reads no rows, and returns how many rows it changed.
+    + fn exec(sql: String, args: Array[Value] (.{})) uint !Error
+    // Starts an `INSERT INTO` on this transaction.
+    + fn insert_into(table: String) Query
+    // The id the last insert wrote, where the database has one.
+    + fn last_insert_id() int
+    // Runs a statement and returns its first row, or null.
+    + fn one(sql: String, args: Array[Value] (.{})) ?Map[Value] !Error
+    // Runs a statement and returns its rows, to be read one at a time.
+    + fn query(sql: String, args: Array[Value] (.{})) Rows !Error
+    // Rolls the work back. The transaction is closed afterwards.
+    + fn rollback() void !Error
+    // Starts a `SELECT` on this transaction.
+    + fn select(columns: String ("*")) Query
+    // Starts an `UPDATE` on this transaction.
+    + fn update(table: String) Query
+    // Runs a statement that answers with one value, and returns it.
+    + fn value(sql: String, args: Array[Value] (.{})) Value !Error
 }
 ```
 

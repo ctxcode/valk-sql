@@ -147,6 +147,36 @@ db.delete_from("users")
 
 Conditions are text on purpose: the builder saves the placeholder bookkeeping, not SQL itself.
 
+## Joins, pages and upserts
+
+```rust
+query.join_on("posts", "posts.user_id = users.id")     // JOIN posts ON ...
+query.left_join("teams", "teams.id = users.team_id")   // LEFT JOIN teams ON ...
+query.page(2, 20)                                      // LIMIT 20 OFFSET 20, counting from page 1
+let total = query.count() ! panic("%{E.message}")      // the same query as a count(*)
+```
+
+`count` runs the query the caller built — its table, joins and conditions — without the order,
+limit and offset, which is the number that belongs next to a page of rows.
+
+An upsert is written differently by every one of these databases, and the builder writes the
+right one:
+
+```rust
+db.insert_into("counters")
+    .values(.{ "name" => sql.Value.of("visits"), "n" => sql.Value.of_int(1) })
+    .on_conflict_update(.{ "name" }, .{ "n" })
+    .run() ! panic("%{E.message}")
+
+// SQLite, Postgres: INSERT INTO counters (name, n) VALUES (?, ?)
+//                   ON CONFLICT (name) DO UPDATE SET n = excluded.n
+// MySQL:            INSERT INTO counters (name, n) VALUES (?, ?)
+//                   ON DUPLICATE KEY UPDATE n = VALUES(n)
+```
+
+`on_conflict_nothing` keeps the row that is already there. The columns that decide what a clash
+is are what SQLite and Postgres need; MySQL works that out from its own indexes and ignores them.
+
 ## Rows into your own classes
 
 ```rust
@@ -167,6 +197,9 @@ loop.
 
 ## Transactions
 
+A transaction that fits in a closure commits when the closure returns and rolls back when it
+throws:
+
 ```rust
 db.transaction(fn(tx: sql.Db) !sql.Error {
     tx.exec("UPDATE accounts SET balance = balance - ? WHERE id = ?", .{ sql.Value.of_int(10), sql.Value.of_int(1) }) !>
@@ -174,8 +207,24 @@ db.transaction(fn(tx: sql.Db) !sql.Error {
 }) ! panic("%{E.message}")
 ```
 
-It commits when the work returns and rolls back when it throws. `begin`, `commit` and
-`rollback` are there for a transaction that spans more than one function.
+For work that does not fit in one closure, `begin_transaction` hands the transaction back
+instead. `close` rolls back unless the work was committed, so a `defer` covers every way out of
+the function — an early return, a thrown error, a panic:
+
+```rust
+let tx = db.begin_transaction() ! panic("%{E.message}")
+defer tx.close()
+
+tx.exec("UPDATE accounts SET balance = balance - ? WHERE id = ?", .{ amount, from }) !>
+if (tx.value("SELECT balance FROM accounts WHERE id = ?", .{ from }) !>).to_int() < 0 {
+    return "not enough money"      // the defer rolls it back
+}
+tx.exec("UPDATE accounts SET balance = balance + ? WHERE id = ?", .{ amount, to }) !>
+tx.commit() !>
+```
+
+A `Tx` takes the same statements and builders as a `Db`. The plain `begin`, `commit` and
+`rollback` are there as well, for a transaction that is handed around by something else.
 
 ## Migrations
 

@@ -233,3 +233,73 @@ test "Mixing AND and OR" {
     // For Postgres the numbering follows the same order
     assert(grouped.to_sql(sql.Dialect.postgres) == "SELECT * FROM users WHERE (active = $1) AND ((role = $2) OR (score > $3))")
 }
+
+test "Joins, pages and upserts" {
+    // Joins with the table and the condition apart
+    let joined = sql.Query.select("users.name, posts.title")
+        .from("users")
+        .join_on("posts", "posts.user_id = users.id")
+        .left_join("teams", "teams.id = users.team_id")
+    assert(joined.to_sql() == "SELECT users.name, posts.title FROM users JOIN posts ON posts.user_id = users.id LEFT JOIN teams ON teams.id = users.team_id")
+
+    // A page is a limit and an offset that count from one
+    assert(sql.Query.select().from("t").page(1, 20).to_sql() == "SELECT * FROM t LIMIT 20")
+    assert(sql.Query.select().from("t").page(3, 20).to_sql() == "SELECT * FROM t LIMIT 20 OFFSET 40")
+    // Page 0 is the first page rather than a negative offset
+    assert(sql.Query.select().from("t").page(0, 10).to_sql() == "SELECT * FROM t LIMIT 10")
+
+    // Upserts, which every database writes differently
+    let upsert = sql.Query.insert_into("counters")
+    upsert.values(.{ "name" => sql.Value.of("visits"), "n" => sql.Value.of_int(1) })
+    upsert.on_conflict_update(.{ "name" }, .{ "n" })
+    assert(upsert.to_sql(sql.Dialect.sqlite).ends_with("ON CONFLICT (name) DO UPDATE SET n = excluded.n"))
+    assert(upsert.to_sql(sql.Dialect.postgres).ends_with("ON CONFLICT (name) DO UPDATE SET n = excluded.n"))
+    assert(upsert.to_sql(sql.Dialect.mysql).ends_with("ON DUPLICATE KEY UPDATE n = VALUES(n)"))
+
+    // Leaving the columns out writes every column of the insert
+    let all_columns = sql.Query.insert_into("t")
+    all_columns.values(.{ "a" => sql.Value.of_int(1) })
+    all_columns.on_conflict_update(.{ "a" })
+    assert(all_columns.to_sql().ends_with("ON CONFLICT (a) DO UPDATE SET a = excluded.a"))
+
+    // Or keeping what is already there
+    let nothing = sql.Query.insert_into("t")
+    nothing.values(.{ "a" => sql.Value.of_int(1) })
+    nothing.on_conflict_nothing(.{ "a" })
+    assert(nothing.to_sql().ends_with("ON CONFLICT (a) DO NOTHING"))
+    assert(nothing.to_sql(sql.Dialect.mysql).ends_with("ON DUPLICATE KEY UPDATE a = a"))
+}
+
+test "A transaction without a closure" {
+    let driver = fake()
+    let db = fake_db(driver)
+
+    // Committing
+    let tx = db.begin_transaction() ! { assert(false) return }
+    assert(tx.open)
+    tx.exec("INSERT INTO t VALUES (1)") ! { assert(false) return }
+    tx.commit() ! { assert(false) return }
+    assert(!tx.open)
+    assert(driver.transactions.contains("begin"))
+    assert(driver.transactions.contains("commit"))
+
+    // Closing without committing rolls back, which is what a `defer` does on the way out
+    let second = db.begin_transaction() ! { assert(false) return }
+    second.exec("INSERT INTO t VALUES (2)") ! { assert(false) return }
+    second.close()
+    assert(!second.open)
+    assert(driver.transactions.contains("rollback"))
+
+    // Closing a transaction that was committed does nothing more
+    let before = driver.transactions.length
+    tx.close()
+    assert(driver.transactions.length == before)
+
+    // Committing twice is refused rather than sent twice
+    tx.commit() ! {
+        assert(error_is(E.code, error))
+        assert(E.message.contains("already finished"))
+        return
+    }
+    assert(false)
+}

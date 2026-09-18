@@ -1,4 +1,8 @@
 // What a Query is building
+value CONFLICT_NONE (0)
+value CONFLICT_UPDATE (1)
+value CONFLICT_NOTHING (2)
+
 value QUERY_SELECT (0)
 value QUERY_INSERT (1)
 value QUERY_UPDATE (2)
@@ -32,6 +36,9 @@ value QUERY_DELETE (3)
     havings: Conditions (.{})
     orders: String ("")
     returns: String ("")
+    conflict_kind: uint (CONFLICT_NONE)
+    conflict_columns: Array[String] (.{})
+    conflict_updates: Array[String] (.{})
     row_limit: uint (0)
     row_offset: uint (0)
     // The values, in the order the parts were added
@@ -68,11 +75,28 @@ value QUERY_DELETE (3)
         return this
     }
 
-    /// Adds a join, written as it is: `join("JOIN posts ON posts.user_id = users.id")`.
+    /// Adds a join, written as it is: `join("LEFT JOIN posts ON posts.user_id = users.id")`.
     + fn join(clause: String, args: Array[Value] (.{})) SELF {
         this.joins.append(clause)
         this.join_args.append_many(args)
         return this
+    }
+
+    /// Adds `JOIN <table> ON <condition>`.
+    ///
+    /// ```valk
+    /// query.join_on("posts", "posts.user_id = users.id")
+    /// ```
+    + fn join_on(table: String, condition: String, args: Array[Value] (.{})) SELF {
+        return this.join("JOIN " + table + " ON " + condition, args)
+    }
+    /// Adds `LEFT JOIN <table> ON <condition>`, which keeps the rows that match nothing.
+    + fn left_join(table: String, condition: String, args: Array[Value] (.{})) SELF {
+        return this.join("LEFT JOIN " + table + " ON " + condition, args)
+    }
+    /// Adds `INNER JOIN <table> ON <condition>`.
+    + fn inner_join(table: String, condition: String, args: Array[Value] (.{})) SELF {
+        return this.join("INNER JOIN " + table + " ON " + condition, args)
     }
 
     /// Adds a condition with `AND`.
@@ -207,6 +231,44 @@ value QUERY_DELETE (3)
         this.row_offset = count
         return this
     }
+
+    /// Takes one page of rows: page 1 is the first `per_page` rows, page 2 the next, and so on.
+    ///
+    /// ```valk
+    /// let rows = db.select().from("posts").order_by("id").page(2, 20).all() ! panic("%{E.message}")
+    /// ```
+    + fn page(number: uint, per_page: uint) SELF {
+        let page = number > 0 ? number : 1
+        this.row_limit = per_page
+        this.row_offset = (page - 1) * per_page
+        return this
+    }
+    /// On a row that clashes with one that is already there, writes the new values over it.
+    ///
+    /// `columns` are the ones that decide what a clash is, which SQLite and Postgres need (the
+    /// columns of the unique index); MySQL finds that out by itself and ignores them.
+    /// `update_columns` are the ones to overwrite, and empty means every column of the insert.
+    ///
+    /// ```valk
+    /// db.insert_into("counters")
+    ///     .values(.{ "name" => sql.Value.of("visits"), "n" => sql.Value.of_int(1) })
+    ///     .on_conflict_update(.{ "name" }, .{ "n" })
+    ///     .run() ! panic("%{E.message}")
+    /// ```
+    + fn on_conflict_update(columns: Array[String], update_columns: Array[String] (.{})) SELF {
+        this.conflict_columns = columns
+        this.conflict_updates = update_columns
+        this.conflict_kind = CONFLICT_UPDATE
+        return this
+    }
+
+    /// On a row that clashes with one that is already there, keeps the row that is there.
+    + fn on_conflict_nothing(columns: Array[String] (.{})) SELF {
+        this.conflict_columns = columns
+        this.conflict_kind = CONFLICT_NOTHING
+        return this
+    }
+
     /// Adds a `RETURNING`, which SQLite and Postgres have and MySQL does not.
     + fn returning(columns: String) SELF {
         this.returns = columns
@@ -259,6 +321,7 @@ value QUERY_DELETE (3)
                 out.write_byte(')')
                 row++
             }
+            if this.conflict_kind != CONFLICT_NONE : this.write_conflict(out, dialect)
         } else if kind == QUERY_UPDATE {
             out.write("UPDATE ")
             out.write(this.table)
@@ -340,6 +403,82 @@ value QUERY_DELETE (3)
         if !isset(row) : return Value.null()
         each row as value : return value
         return Value.null()
+    }
+
+    /// Runs the same query as a count, without its order, limit and offset.
+    ///
+    /// This is the count that belongs next to a page of rows: the table, the joins and the
+    /// conditions are the ones of this query.
+    + fn count(expression: String ("*")) uint !Error {
+        let db = this.database() !>
+        let columns = this.columns
+        let limit = this.row_limit
+        let offset = this.row_offset
+        let orders = this.orders
+        this.columns = "count(" + expression + ") AS n"
+        this.row_limit = 0
+        this.row_offset = 0
+        this.orders = ""
+        let statement, args = this.build(db.dialect)
+        this.columns = columns
+        this.row_limit = limit
+        this.row_offset = offset
+        this.orders = orders
+
+        let rows = db.driver.query(statement, args) !>
+        let row: Map[Value] = .{}
+        let found = rows.next(row) ! { rows.close() throw E }
+        rows.close()
+        if !found : return 0
+        each row as value : return value.to_uint()
+        return 0
+    }
+
+    // `ON CONFLICT` for SQLite and Postgres, `ON DUPLICATE KEY` for MySQL
+    fn write_conflict(out: ByteBuffer, dialect: Dialect) {
+        let updates = this.conflict_updates.length > 0 ? this.conflict_updates : this.insert_columns
+
+        if dialect == Dialect.mysql {
+            if this.conflict_kind == CONFLICT_NOTHING {
+                // MySQL has no "do nothing"; writing a column to itself is how it is done
+                let column = this.insert_columns.get(0) !? ""
+                out.write(" ON DUPLICATE KEY UPDATE ")
+                out.write(column)
+                out.write(" = ")
+                out.write(column)
+                return
+            }
+            out.write(" ON DUPLICATE KEY UPDATE ")
+            each updates as column, index {
+                if index > 0 : out.write(", ")
+                out.write(column)
+                out.write(" = VALUES(")
+                out.write(column)
+                out.write_byte(')')
+            }
+            return
+        }
+
+        out.write(" ON CONFLICT")
+        if this.conflict_columns.length > 0 {
+            out.write(" (")
+            each this.conflict_columns as column, index {
+                if index > 0 : out.write(", ")
+                out.write(column)
+            }
+            out.write_byte(')')
+        }
+        if this.conflict_kind == CONFLICT_NOTHING {
+            out.write(" DO NOTHING")
+            return
+        }
+        out.write(" DO UPDATE SET ")
+        each updates as column, index {
+            if index > 0 : out.write(", ")
+            out.write(column)
+            out.write(" = excluded.")
+            out.write(column)
+        }
     }
 
     fn database() Db !Error {

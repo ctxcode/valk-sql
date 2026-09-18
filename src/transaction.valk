@@ -1,0 +1,98 @@
+/// A transaction that is not held by a closure.
+///
+/// `close` rolls back unless the work was committed, so a `defer` right after the `begin` makes
+/// every way out of the function safe: an early return, a thrown error, a panic in the middle.
+///
+/// ```valk
+/// let tx = db.begin_transaction() ! panic("%{E.message}")
+/// defer tx.close()
+///
+/// tx.exec("UPDATE accounts SET balance = balance - ? WHERE id = ?", .{ amount, from }) !>
+/// if (tx.value("SELECT balance FROM accounts WHERE id = ?", .{ from }) !>).to_int() < 0 {
+///     return "not enough money"      // the defer rolls it back
+/// }
+/// tx.exec("UPDATE accounts SET balance = balance + ? WHERE id = ?", .{ amount, to }) !>
+/// tx.commit() !>
+/// ```
+///
+/// `Db.transaction` does the same with a closure, for work that fits in one.
++ class Tx {
+    /// The database this transaction runs on. Statements may go through it as well.
+    + db: Db
+    /// Whether the transaction is still open: neither committed nor rolled back.
+    ~ open: bool (true)
+
+    /// Runs a statement that reads no rows, and returns how many rows it changed.
+    + fn exec(sql: String, args: Array[Value] (.{})) uint !Error {
+        return this.db.exec(sql, args) !>
+    }
+    /// Runs a statement and returns its rows, to be read one at a time.
+    + fn query(sql: String, args: Array[Value] (.{})) Rows !Error {
+        return this.db.query(sql, args) !>
+    }
+    /// Runs a statement and returns every row.
+    + fn all(sql: String, args: Array[Value] (.{})) Array[Map[Value]] !Error {
+        return this.db.all(sql, args) !>
+    }
+    /// Runs a statement and returns its first row, or null.
+    + fn one(sql: String, args: Array[Value] (.{})) ?Map[Value] !Error {
+        return this.db.one(sql, args) !>
+    }
+    /// Runs a statement that answers with one value, and returns it.
+    + fn value(sql: String, args: Array[Value] (.{})) Value !Error {
+        return this.db.value(sql, args) !>
+    }
+    /// The id the last insert wrote, where the database has one.
+    + fn last_insert_id() int {
+        return this.db.last_insert_id()
+    }
+
+    /// Starts a `SELECT` on this transaction.
+    + fn select(columns: String ("*")) Query {
+        return this.db.select(columns)
+    }
+    /// Starts an `INSERT INTO` on this transaction.
+    + fn insert_into(table: String) Query {
+        return this.db.insert_into(table)
+    }
+    /// Starts an `UPDATE` on this transaction.
+    + fn update(table: String) Query {
+        return this.db.update(table)
+    }
+    /// Starts a `DELETE FROM` on this transaction.
+    + fn delete_from(table: String) Query {
+        return this.db.delete_from(table)
+    }
+
+    /// Commits the work. The transaction is closed afterwards.
+    + fn commit() !Error {
+        if !this.open : throw .error { message: "This transaction was already finished" }
+        this.open = false
+        this.db.commit() !>
+    }
+
+    /// Rolls the work back. The transaction is closed afterwards.
+    + fn rollback() !Error {
+        if !this.open : return
+        this.open = false
+        this.db.rollback() !>
+    }
+
+    /// Rolls the work back unless it was committed. Made for `defer`, so it throws nothing.
+    + fn close() {
+        if !this.open : return
+        this.open = false
+        this.db.rollback() _
+    }
+}
+
+extend Db {
+    /// Opens a transaction and hands it back, for work that does not fit in a closure.
+    ///
+    /// Put `defer tx.close()` right after it: the transaction then rolls back on every way out
+    /// of the function that is not a `commit`.
+    + fn begin_transaction(immediate: bool (false)) Tx !Error {
+        this.begin(immediate) !>
+        return Tx { db: this }
+    }
+}
