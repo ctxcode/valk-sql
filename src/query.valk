@@ -24,20 +24,18 @@ value QUERY_DELETE (3)
     table: String ("")
     columns: String ("*")
     joins: Array[String] (.{})
-    conditions: Array[String] (.{})
+    conditions: Conditions (.{})
     assignments: Array[String] (.{})
     insert_columns: Array[String] (.{})
     insert_rows: uint (0)
     groups: String ("")
-    havings: Array[String] (.{})
+    havings: Conditions (.{})
     orders: String ("")
     returns: String ("")
     row_limit: uint (0)
     row_offset: uint (0)
     // The values, in the order the parts were added
-    where_args: Array[Value] (.{})
     join_args: Array[Value] (.{})
-    having_args: Array[Value] (.{})
     set_args: Array[Value] (.{})
     insert_args: Array[Value] (.{})
 
@@ -77,35 +75,66 @@ value QUERY_DELETE (3)
         return this
     }
 
-    /// Adds a condition. Several conditions are joined with `AND`.
+    /// Adds a condition with `AND`.
     ///
     /// Each `?` in the condition takes the next value from `args`.
     + fn where(condition: String, args: Array[Value] (.{})) SELF {
-        this.conditions.append(condition)
-        this.where_args.append_many(args)
+        this.conditions.where(condition, args)
         return this
     }
 
-    /// Adds `column IN (?, ?, …)` with one placeholder per value.
+    /// Adds a condition with `OR`.
+    ///
+    /// ```valk
+    /// query.where("role = ?", .{ sql.Value.of("admin") })
+    /// query.or_where("score > ?", .{ sql.Value.of_int(100) })
+    /// // WHERE (role = ?) OR (score > ?)
+    /// ```
+    + fn or_where(condition: String, args: Array[Value] (.{})) SELF {
+        this.conditions.or_where(condition, args)
+        return this
+    }
+
+    /// Adds a group of conditions with `AND`, written in brackets, for a query that mixes `AND`
+    /// and `OR`.
+    ///
+    /// ```valk
+    /// query.where("active = ?", .{ sql.Value.of_bool(true) })
+    /// query.where_group(fn(w: sql.Conditions) {
+    ///     w.where("role = ?", .{ sql.Value.of("admin") })
+    ///     w.or_where("score > ?", .{ sql.Value.of_int(100) })
+    /// })
+    /// // WHERE (active = ?) AND ((role = ?) OR (score > ?))
+    /// ```
+    + fn where_group(build: fn(Conditions)()) SELF {
+        this.conditions.group(build)
+        return this
+    }
+    /// Adds a group of conditions with `OR`, written in brackets.
+    + fn or_where_group(build: fn(Conditions)()) SELF {
+        this.conditions.or_group(build)
+        return this
+    }
+
+    /// Adds `column IN (?, ?, …)` with one placeholder per value. An empty list matches nothing.
     + fn where_in(column: String, values: Array[Value]) SELF {
-        if values.length == 0 {
-            // An empty list matches nothing, and `IN ()` is not valid SQL everywhere
-            this.conditions.append("1 = 0")
-            return this
-        }
-        this.conditions.append(column + " IN (" + placeholders(values.length) + ")")
-        this.where_args.append_many(values)
+        this.conditions.where_in(column, values)
+        return this
+    }
+    /// Adds `column NOT IN (?, ?, …)`. An empty list matches everything.
+    + fn where_not_in(column: String, values: Array[Value]) SELF {
+        this.conditions.where_not_in(column, values)
         return this
     }
 
     /// Adds `column IS NULL`.
     + fn where_null(column: String) SELF {
-        this.conditions.append(column + " IS NULL")
+        this.conditions.where_null(column)
         return this
     }
     /// Adds `column IS NOT NULL`.
     + fn where_not_null(column: String) SELF {
-        this.conditions.append(column + " IS NOT NULL")
+        this.conditions.where_not_null(column)
         return this
     }
 
@@ -148,10 +177,19 @@ value QUERY_DELETE (3)
         this.groups = columns
         return this
     }
-    /// Adds a `HAVING` condition.
+    /// Adds a `HAVING` condition with `AND`.
     + fn having(condition: String, args: Array[Value] (.{})) SELF {
-        this.havings.append(condition)
-        this.having_args.append_many(args)
+        this.havings.where(condition, args)
+        return this
+    }
+    /// Adds a `HAVING` condition with `OR`.
+    + fn or_having(condition: String, args: Array[Value] (.{})) SELF {
+        this.havings.or_where(condition, args)
+        return this
+    }
+    /// Adds a group of `HAVING` conditions, written in brackets.
+    + fn having_group(build: fn(Conditions)()) SELF {
+        this.havings.group(build)
         return this
     }
     /// Adds an `ORDER BY`, written as it is: `order_by("name ASC, id DESC")`.
@@ -177,17 +215,20 @@ value QUERY_DELETE (3)
 
     /// Returns the values of the statement, in the order its placeholders take them.
     + fn args() Array[Value] {
-        let out: Array[Value] = .{}
-        out.append_many(this.insert_args)
-        out.append_many(this.set_args)
-        out.append_many(this.join_args)
-        out.append_many(this.where_args)
-        out.append_many(this.having_args)
-        return out
+        let _, args = this.build(Dialect.sqlite)
+        return args
     }
 
     /// Writes the statement for `dialect`.
     + fn to_sql(dialect: Dialect (Dialect.sqlite)) String {
+        let statement, _ = this.build(dialect)
+        return statement
+    }
+
+    // The statement and its values in one pass, so that a value always sits where its
+    // placeholder does, however the conditions are nested
+    fn build(dialect: Dialect) (String, Array[Value]) {
+        let args: Array[Value] = .{}
         let out = ByteBuffer.new(128)
         let kind = this.kind
         if kind == QUERY_SELECT {
@@ -231,14 +272,13 @@ value QUERY_DELETE (3)
             out.write(this.table)
         }
 
+        args.append_many(this.insert_args)
+        args.append_many(this.set_args)
+        args.append_many(this.join_args)
+
         if this.conditions.length > 0 {
             out.write(" WHERE ")
-            each this.conditions as condition, index {
-                if index > 0 : out.write(" AND ")
-                out.write_byte('(')
-                out.write(condition)
-                out.write_byte(')')
-            }
+            this.conditions.render(out, args)
         }
         if this.groups.length > 0 {
             out.write(" GROUP BY ")
@@ -246,12 +286,7 @@ value QUERY_DELETE (3)
         }
         if this.havings.length > 0 {
             out.write(" HAVING ")
-            each this.havings as having, index {
-                if index > 0 : out.write(" AND ")
-                out.write_byte('(')
-                out.write(having)
-                out.write_byte(')')
-            }
+            this.havings.render(out, args)
         }
         if this.orders.length > 0 {
             out.write(" ORDER BY ")
@@ -272,24 +307,27 @@ value QUERY_DELETE (3)
             out.write(" RETURNING ")
             out.write(this.returns)
         }
-        return rewrite(out.to_string(), dialect)
+        return (rewrite(out.to_string(), dialect), args)
     }
 
     /// Runs the statement and returns how many rows it changed.
     + fn run() uint !Error {
         let db = this.database() !>
-        return db.driver.exec(this.to_sql(db.dialect), this.args()) !>
+        let statement, args = this.build(db.dialect)
+        return db.driver.exec(statement, args) !>
     }
     /// Runs the statement and returns every row.
     + fn all() Array[Map[Value]] !Error {
         let db = this.database() !>
-        return rows_of(db.driver.query(this.to_sql(db.dialect), this.args()) !>) !>
+        let statement, args = this.build(db.dialect)
+        return rows_of(db.driver.query(statement, args) !>) !>
     }
     /// Runs the statement and returns its first row, or null.
     + fn one() ?Map[Value] !Error {
         let db = this.database() !>
         this.limit(1)
-        let rows = db.driver.query(this.to_sql(db.dialect), this.args()) !>
+        let statement, args = this.build(db.dialect)
+        let rows = db.driver.query(statement, args) !>
         let row: Map[Value] = .{}
         let found = rows.next(row) ! { rows.close() throw E }
         rows.close()

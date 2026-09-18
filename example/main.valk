@@ -27,10 +27,10 @@ fn main() {
 
     // The builder writes the statement for whichever database is behind it
     let query = db.select("id, name")
-    query.from("users")
-    query.where("age > ?", .{ sql.Value.of_int(18) })
-    query.order_by("name")
-    query.limit(10)
+        .from("users")
+        .where("age > ?", .{ sql.Value.of_int(18) })
+        .order_by("name")
+        .limit(10)
     println("sqlite:   " + query.to_sql(sql.Dialect.sqlite))
     println("postgres: " + query.to_sql(sql.Dialect.postgres))
 

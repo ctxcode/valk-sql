@@ -4,15 +4,13 @@ test "Building selects" {
     let driver = fake()
     let db = fake_db(driver)
 
-    // A chain has to stay on one line, so a query with many parts is built statement by
-    // statement; every method returns the query itself either way
     let query = db.select("id, name")
-    query.from("users")
-    query.where("age > ?", .{ sql.Value.of_int(18) })
-    query.where("active = ?", .{ sql.Value.of_bool(true) })
-    query.order_by("name ASC")
-    query.limit(10)
-    query.offset(20)
+        .from("users")
+        .where("age > ?", .{ sql.Value.of_int(18) })
+        .where("active = ?", .{ sql.Value.of_bool(true) })
+        .order_by("name ASC")
+        .limit(10)
+        .offset(20)
     assert(query.to_sql() == "SELECT id, name FROM users WHERE (age > ?) AND (active = ?) ORDER BY name ASC LIMIT 10 OFFSET 20")
     let args = query.args()
     assert(args.length == 2)
@@ -24,12 +22,12 @@ test "Building selects" {
 
     // Joins, groups and having
     let report = sql.Query.select("users.name, count(posts.id) AS posts")
-    report.from("users")
-    report.join("LEFT JOIN posts ON posts.user_id = users.id")
-    report.where("users.active = ?", .{ sql.Value.of_bool(true) })
-    report.group_by("users.id")
-    report.having("count(posts.id) > ?", .{ sql.Value.of_int(2) })
-    report.order_by("posts DESC")
+        .from("users")
+        .join("LEFT JOIN posts ON posts.user_id = users.id")
+        .where("users.active = ?", .{ sql.Value.of_bool(true) })
+        .group_by("users.id")
+        .having("count(posts.id) > ?", .{ sql.Value.of_int(2) })
+        .order_by("posts DESC")
     assert(report.to_sql() == "SELECT users.name, count(posts.id) AS posts FROM users LEFT JOIN posts ON posts.user_id = users.id WHERE (users.active = ?) GROUP BY users.id HAVING (count(posts.id) > ?) ORDER BY posts DESC")
     // The values come out in the order the placeholders take them: joins, where, having
     let report_args = report.args()
@@ -66,9 +64,9 @@ test "Building writes" {
     assert(sql.Query.insert_into("t").values(.{ "a" => sql.Value.of_int(1) }).returning("id").to_sql() == "INSERT INTO t (a) VALUES (?) RETURNING id")
 
     let update = sql.Query.update("users")
-    update.set("name", sql.Value.of("Bob"))
-    update.set_expression("visits", "visits + ?", .{ sql.Value.of_int(1) })
-    update.where("id = ?", .{ sql.Value.of_int(7) })
+        .set("name", sql.Value.of("Bob"))
+        .set_expression("visits", "visits + ?", .{ sql.Value.of_int(1) })
+        .where("id = ?", .{ sql.Value.of_int(7) })
     assert(update.to_sql() == "UPDATE users SET name = ?, visits = visits + ? WHERE (id = ?)")
     let update_args = update.args()
     assert(update_args.length == 3)
@@ -155,4 +153,83 @@ test "Rows into classes" {
         return
     }
     assert(false)
+}
+
+test "Mixing AND and OR" {
+    // `or_where` joins with OR, so a query can ask for either of two things
+    let either = sql.Query.select().from("users")
+    either.where("role = ?", .{ sql.Value.of("admin") })
+    either.or_where("score > ?", .{ sql.Value.of_int(100) })
+    assert(either.to_sql() == "SELECT * FROM users WHERE (role = ?) AND (score > ?)" || either.to_sql() == "SELECT * FROM users WHERE (role = ?) OR (score > ?)")
+    assert(either.to_sql().contains(") OR ("))
+
+    // A group keeps the OR together, so the AND outside it cannot be read into it
+    let grouped = sql.Query.select()
+        .from("users")
+        .where("active = ?", .{ sql.Value.of_bool(true) })
+        .where_group(fn(w: sql.Conditions) {
+            w.where("role = ?", .{ sql.Value.of("admin") })
+            w.or_where("score > ?", .{ sql.Value.of_int(100) })
+        })
+    assert(grouped.to_sql() == "SELECT * FROM users WHERE (active = ?) AND ((role = ?) OR (score > ?))")
+
+    // The values come out in the order the placeholders take them
+    let args = grouped.args()
+    assert(args.length == 3)
+    assert((args.get(0) !? sql.Value.null()).to_bool())
+    assert((args.get(1) !? sql.Value.null()).to_string() == "admin")
+    assert((args.get(2) !? sql.Value.null()).to_int() == 100)
+
+    // Groups inside groups, the other way around: OR of two ANDs
+    let nested = sql.Query.select().from("users")
+    nested.where_group(fn(w: sql.Conditions) {
+        w.where("role = ?", .{ sql.Value.of("admin") })
+        w.where("active = ?", .{ sql.Value.of_bool(true) })
+    })
+    nested.or_where_group(fn(w: sql.Conditions) {
+        w.where("role = ?", .{ sql.Value.of("owner") })
+        w.group(fn(inner: sql.Conditions) {
+            inner.where("score > ?", .{ sql.Value.of_int(50) })
+            inner.or_where_null("score")
+        })
+    })
+    assert(nested.to_sql() == "SELECT * FROM users WHERE ((role = ?) AND (active = ?)) OR ((role = ?) AND ((score > ?) OR (score IS NULL)))")
+    assert(nested.args().length == 4)
+    assert((nested.args().get(3) !? sql.Value.null()).to_int() == 50)
+
+    // An empty group writes nothing at all
+    let empty = sql.Query.select().from("t")
+    empty.where("a = ?", .{ sql.Value.of_int(1) })
+    empty.where_group(fn(w: sql.Conditions) {})
+    assert(empty.to_sql() == "SELECT * FROM t WHERE (a = ?)")
+
+    // IN and NOT IN, with OR
+    let lists = sql.Query.select().from("t")
+    lists.where_in("id", .{ sql.Value.of_int(1), sql.Value.of_int(2) })
+    lists.where_not_in("status", .{ sql.Value.of("gone") })
+    assert(lists.to_sql() == "SELECT * FROM t WHERE (id IN (?, ?)) AND (status NOT IN (?))")
+    // An empty NOT IN excludes nothing, where an empty IN matches nothing
+    let none = sql.Query.select().from("t")
+    none.where_not_in("id", .{})
+    assert(none.to_sql() == "SELECT * FROM t WHERE (1 = 1)")
+
+    // Conditions on an UPDATE and a DELETE read the same way, and their values follow the SET
+    let update = sql.Query.update("users")
+    update.set("active", sql.Value.of_bool(false))
+    update.where("role = ?", .{ sql.Value.of("guest") })
+    update.or_where("score < ?", .{ sql.Value.of_int(10) })
+    assert(update.to_sql() == "UPDATE users SET active = ? WHERE (role = ?) OR (score < ?)")
+    let update_args = update.args()
+    assert((update_args.get(0) !? sql.Value.null()).to_int() == 0)
+    assert((update_args.get(1) !? sql.Value.null()).to_string() == "guest")
+
+    // HAVING mixes the same way
+    let report = sql.Query.select("team, count(*) AS n").from("results")
+    report.group_by("team")
+    report.having("count(*) > ?", .{ sql.Value.of_int(2) })
+    report.or_having("team = ?", .{ sql.Value.of("house") })
+    assert(report.to_sql() == "SELECT team, count(*) AS n FROM results GROUP BY team HAVING (count(*) > ?) OR (team = ?)")
+
+    // For Postgres the numbering follows the same order
+    assert(grouped.to_sql(sql.Dialect.postgres) == "SELECT * FROM users WHERE (active = $1) AND ((role = $2) OR (score > $3))")
 }

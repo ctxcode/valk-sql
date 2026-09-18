@@ -5,7 +5,8 @@ One API over the SQL databases [Valk](https://valk-lang.dev) speaks: SQLite, MyS
 Postgres. It holds what every program writes again otherwise — a connection pool, migrations, a
 query builder, rows read into your own classes — and the driver packages plug into it.
 
-Requires Valk 0.7.0 or newer. This package has no dependencies of its own: it talks to a driver
+Requires Valk 0.7.3 or newer, whose method chains the builder is written for. This package has
+no dependencies of its own: it talks to a driver
 through an interface, and the driver packages implement it.
 
 ## Install
@@ -71,32 +72,77 @@ with `sql.convert(x)` for whatever a variable happens to hold.
 ## The query builder
 
 The builder writes the statement and keeps the values apart from it. Every method returns the
-query, so short queries read as one line; longer ones are built statement by statement, since a
-method chain in Valk stays on one line:
+query, so a query reads as one chain:
 
 ```rust
-let rows = db.select().from("users").where("id = ?", .{ sql.Value.of_int(7) }).all() ! panic("%{E.message}")
-
-let query = db.select("users.name, count(posts.id) AS posts")
-query.from("users")
-query.join("LEFT JOIN posts ON posts.user_id = users.id")
-query.where("users.active = ?", .{ sql.Value.of_bool(true) })
-query.where_in("users.id", ids)
-query.group_by("users.id")
-query.having("count(posts.id) > ?", .{ sql.Value.of_int(2) })
-query.order_by("posts DESC")
-query.limit(10)
-let rows = query.all() ! panic("%{E.message}")
+let rows = db.select("users.name, count(posts.id) AS posts")
+    .from("users")
+    .join("LEFT JOIN posts ON posts.user_id = users.id")
+    .where("users.active = ?", .{ sql.Value.of_bool(true) })
+    .where_in("users.id", ids)
+    .group_by("users.id")
+    .having("count(posts.id) > ?", .{ sql.Value.of_int(2) })
+    .order_by("posts DESC")
+    .limit(10)
+    .all() ! panic("%{E.message}")
 ```
+
+## Mixing AND and OR
+
+`where` joins with `AND` and `or_where` with `OR`. Where the two are mixed, a group puts the
+brackets in, so what binds to what is never left to precedence:
+
+```rust
+// WHERE (active = ?) AND ((role = ?) OR (score > ?))
+let rows = db.select()
+    .from("users")
+    .where("active = ?", .{ sql.Value.of_bool(true) })
+    .where_group(fn(w: sql.Conditions) {
+        w.where("role = ?", .{ sql.Value.of("admin") })
+        w.or_where("score > ?", .{ sql.Value.of_int(100) })
+    })
+    .all() ! panic("%{E.message}")
+```
+
+Groups nest, so the other shape — `OR` of two `AND`s — reads the same way:
+
+```rust
+// WHERE ((role = ?) AND (active = ?)) OR ((role = ?) AND ((score > ?) OR (score IS NULL)))
+query.where_group(fn(w: sql.Conditions) {
+    w.where("role = ?", .{ sql.Value.of("admin") })
+    w.where("active = ?", .{ sql.Value.of_bool(true) })
+})
+query.or_where_group(fn(w: sql.Conditions) {
+    w.where("role = ?", .{ sql.Value.of("owner") })
+    w.group(fn(inner: sql.Conditions) {
+        inner.where("score > ?", .{ sql.Value.of_int(50) })
+        inner.or_where_null("score")
+    })
+})
+```
+
+Inside a group the methods are `where`, `or_where`, `group`, `or_group`, `where_in`,
+`where_not_in`, `where_null`, `or_where_null`, `where_not_null` and `or_where_not_null`. Values
+come out in the order the placeholders take them, however deep the nesting goes, and `HAVING`
+mixes the same way with `having`, `or_having` and `having_group`.
 
 `run()` is for writes, `all()`, `one()` and `value()` for reads, and `to_sql(dialect)` returns
 the statement without running it, which is what makes the builder easy to test. Writes are built
 the same way:
 
 ```rust
-db.insert_into("users").values(.{ "name" => sql.Value.of("Ada"), "age" => sql.Value.of_int(36) }).run() ! panic("%{E.message}")
-db.update("users").set("active", sql.Value.of_bool(false)).where("id = ?", .{ sql.Value.of_int(7) }).run() ! panic("%{E.message}")
-db.delete_from("users").where("id = ?", .{ sql.Value.of_int(7) }).run() ! panic("%{E.message}")
+db.insert_into("users")
+    .values(.{ "name" => sql.Value.of("Ada"), "age" => sql.Value.of_int(36) })
+    .run() ! panic("%{E.message}")
+
+db.update("users")
+    .set("active", sql.Value.of_bool(false))
+    .where("id = ?", .{ sql.Value.of_int(7) })
+    .run() ! panic("%{E.message}")
+
+db.delete_from("users")
+    .where("id = ?", .{ sql.Value.of_int(7) })
+    .run() ! panic("%{E.message}")
 ```
 
 Conditions are text on purpose: the builder saves the placeholder bookkeeping, not SQL itself.

@@ -1,0 +1,122 @@
+// One part of a `WHERE` or `HAVING`: a piece of SQL with its values, or a group of parts.
+class ConditionPart {
+    // How this part joins the one before it
+    joiner: String ("AND")
+    sql: String ("")
+    args: Array[Value] (.{})
+    group: ?Conditions (null)
+}
+
+/// Conditions joined by `AND` and `OR`, with groups where the two are mixed.
+///
+/// Every condition is written with `?` placeholders and its values passed next to it. A group is
+/// written in brackets, so what binds to what is never left to precedence:
+///
+/// ```valk
+/// query.where("active = ?", .{ sql.Value.of_bool(true) })
+/// query.where_group(fn(w: sql.Conditions) {
+///     w.where("role = ?", .{ sql.Value.of("admin") })
+///     w.or_where("score > ?", .{ sql.Value.of_int(100) })
+/// })
+/// // WHERE (active = ?) AND ((role = ?) OR (score > ?))
+/// ```
++ class Conditions {
+    parts: Array[ConditionPart] (.{})
+
+    /// How many conditions this group holds.
+    + get length: uint {
+        return this.parts.length
+    }
+
+    /// Adds a condition with `AND`.
+    + fn where(condition: String, args: Array[Value] (.{})) SELF {
+        this.parts.append(ConditionPart { joiner: "AND", sql: condition, args: args })
+        return this
+    }
+    /// Adds a condition with `OR`.
+    + fn or_where(condition: String, args: Array[Value] (.{})) SELF {
+        this.parts.append(ConditionPart { joiner: "OR", sql: condition, args: args })
+        return this
+    }
+
+    /// Adds a group of conditions with `AND`, written in brackets.
+    + fn group(build: fn(Conditions)()) SELF {
+        return this.add_group("AND", build)
+    }
+    /// Adds a group of conditions with `OR`, written in brackets.
+    + fn or_group(build: fn(Conditions)()) SELF {
+        return this.add_group("OR", build)
+    }
+
+    /// Adds `column IN (?, ?, …)` with `AND`. An empty list matches nothing.
+    + fn where_in(column: String, values: Array[Value]) SELF {
+        return this.add_in("AND", column, values, false)
+    }
+    /// The same with `OR`.
+    + fn or_where_in(column: String, values: Array[Value]) SELF {
+        return this.add_in("OR", column, values, false)
+    }
+    /// Adds `column NOT IN (?, ?, …)` with `AND`. An empty list matches everything.
+    + fn where_not_in(column: String, values: Array[Value]) SELF {
+        return this.add_in("AND", column, values, true)
+    }
+
+    /// Adds `column IS NULL` with `AND`.
+    + fn where_null(column: String) SELF {
+        return this.where(column + " IS NULL")
+    }
+    /// Adds `column IS NULL` with `OR`.
+    + fn or_where_null(column: String) SELF {
+        return this.or_where(column + " IS NULL")
+    }
+    /// Adds `column IS NOT NULL` with `AND`.
+    + fn where_not_null(column: String) SELF {
+        return this.where(column + " IS NOT NULL")
+    }
+    /// Adds `column IS NOT NULL` with `OR`.
+    + fn or_where_not_null(column: String) SELF {
+        return this.or_where(column + " IS NOT NULL")
+    }
+
+    fn add_group(joiner: String, build: fn(Conditions)()) SELF {
+        let group = Conditions {}
+        build(group)
+        // A group nobody put anything in would write `()`
+        if group.length == 0 : return this
+        this.parts.append(ConditionPart { joiner: joiner, group: group })
+        return this
+    }
+
+    fn add_in(joiner: String, column: String, values: Array[Value], negated: bool) SELF {
+        if values.length == 0 {
+            // `IN ()` is not valid SQL; an empty list matches nothing, and `NOT IN ()` everything
+            return this.parts_append(joiner, negated ? "1 = 1" : "1 = 0", .{})
+        }
+        let sql = column + (negated ? " NOT IN (" : " IN (") + placeholders(values.length) + ")"
+        return this.parts_append(joiner, sql, values)
+    }
+
+    fn parts_append(joiner: String, sql: String, args: Array[Value]) SELF {
+        this.parts.append(ConditionPart { joiner: joiner, sql: sql, args: args })
+        return this
+    }
+
+    // Writes the conditions and collects their values in the order the statement takes them
+    fn render(out: ByteBuffer, args: Array[Value]) {
+        each this.parts as part, index {
+            if index > 0 {
+                out.write_byte(' ')
+                out.write(part.joiner)
+                out.write_byte(' ')
+            }
+            out.write_byte('(')
+            let group = part.group
+            if isset(group) : group.render(out, args)
+            else {
+                out.write(part.sql)
+                args.append_many(part.args)
+            }
+            out.write_byte(')')
+        }
+    }
+}

@@ -43,6 +43,36 @@ Namespaces: [main](#main)
 ## Classes for 'main'
 
 ```js
+// Conditions joined by `AND` and `OR`, with groups where the two are mixed.
++ class Conditions {
+    // Adds a group of conditions with `AND`, written in brackets.
+    + fn group(build: fn(Conditions)()) Conditions
+    // How many conditions this group holds.
+    + get length: uint
+    // Adds a group of conditions with `OR`, written in brackets.
+    + fn or_group(build: fn(Conditions)()) Conditions
+    // Adds a condition with `OR`.
+    + fn or_where(condition: String, args: Array[Value] (.{})) Conditions
+    // The same with `OR`.
+    + fn or_where_in(column: String, values: Array[Value]) Conditions
+    // Adds `column IS NOT NULL` with `OR`.
+    + fn or_where_not_null(column: String) Conditions
+    // Adds `column IS NULL` with `OR`.
+    + fn or_where_null(column: String) Conditions
+    // Adds a condition with `AND`.
+    + fn where(condition: String, args: Array[Value] (.{})) Conditions
+    // Adds `column IN (?, ?, …)` with `AND`. An empty list matches nothing.
+    + fn where_in(column: String, values: Array[Value]) Conditions
+    // Adds `column NOT IN (?, ?, …)` with `AND`. An empty list matches everything.
+    + fn where_not_in(column: String, values: Array[Value]) Conditions
+    // Adds `column IS NOT NULL` with `AND`.
+    + fn where_not_null(column: String) Conditions
+    // Adds `column IS NULL` with `AND`.
+    + fn where_null(column: String) Conditions
+}
+```
+
+```js
 // A database, whichever driver is behind it.
 + class Db {
     // The driver behind this database.
@@ -186,8 +216,10 @@ Namespaces: [main](#main)
     + fn from(table: String) Query
     // Adds a `GROUP BY`.
     + fn group_by(columns: String) Query
-    // Adds a `HAVING` condition.
+    // Adds a `HAVING` condition with `AND`.
     + fn having(condition: String, args: Array[Value] (.{})) Query
+    // Adds a group of `HAVING` conditions, written in brackets.
+    + fn having_group(build: fn(Conditions)()) Query
     // Starts an `INSERT INTO`.
     + static fn insert_into(table: String) Query
     // Adds a join, written as it is: `join("JOIN posts ON posts.user_id = users.id")`.
@@ -200,6 +232,12 @@ Namespaces: [main](#main)
     + fn on(db: Db) Query
     // Runs the statement and returns its first row, or null.
     + fn one() ?Map[Value] !Error
+    // Adds a `HAVING` condition with `OR`.
+    + fn or_having(condition: String, args: Array[Value] (.{})) Query
+    // Adds a condition with `OR`.
+    + fn or_where(condition: String, args: Array[Value] (.{})) Query
+    // Adds a group of conditions with `OR`, written in brackets.
+    + fn or_where_group(build: fn(Conditions)()) Query
     // Adds an `ORDER BY`, written as it is: `order_by("name ASC, id DESC")`.
     + fn order_by(columns: String) Query
     // Adds a `RETURNING`, which SQLite and Postgres have and MySQL does not.
@@ -222,10 +260,14 @@ Namespaces: [main](#main)
     + fn value() Value !Error
     // Adds a row to an `INSERT`. Every row must have the same columns.
     + fn values(row: Map[Value]) Query
-    // Adds a condition. Several conditions are joined with `AND`.
+    // Adds a condition with `AND`.
     + fn where(condition: String, args: Array[Value] (.{})) Query
-    // Adds `column IN (?, ?, …)` with one placeholder per value.
+    // Adds a group of conditions with `AND`, written in brackets, for a query that mixes `AND` and `OR`.
+    + fn where_group(build: fn(Conditions)()) Query
+    // Adds `column IN (?, ?, …)` with one placeholder per value. An empty list matches nothing.
     + fn where_in(column: String, values: Array[Value]) Query
+    // Adds `column NOT IN (?, ?, …)`. An empty list matches everything.
+    + fn where_not_in(column: String, values: Array[Value]) Query
     // Adds `column IS NOT NULL`.
     + fn where_not_null(column: String) Query
     // Adds `column IS NULL`.
