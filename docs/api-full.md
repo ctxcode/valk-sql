@@ -233,6 +233,8 @@ Adds `column IS NULL` with `AND`.
     + fn delete_from(table: String) Query
     // Which database is on the other end.
     + get dialect: Dialect
+    // Walks the rows of a statement one at a time, without holding them all in memory.
+    + fn each_row(sql: String, args: Array[Value] (.{}), handler: fn(Map[Value])(bool !Error)) uint !Error
     // Runs a statement that reads no rows, and returns how many rows it changed.
     + fn exec(sql: String, args: Array[Value] (.{})) uint !Error
     // Starts an `INSERT INTO` on this database.
@@ -311,6 +313,25 @@ Starts a `DELETE FROM` on this database.
 #### dialect
 
 Which database is on the other end.
+
+#### each_row
+
+Walks the rows of a statement one at a time, without holding them all in memory.
+
+The handler is given each row and returns whether to carry on, so it can stop early.
+Returns how many rows it saw.
+
+The rows arrive from the connection as they are read, so **nothing else may run on that
+connection while the walk is going**: a statement sent in the middle of it ends the walk.
+A walk that has to write belongs in `chunk` or `chunk_by_id`, which read a page at a time
+and leave the connection free in between.
+
+```valk
+db.each_row("SELECT id, email FROM users", .{}, fn(row: Map[sql.Value]) bool !sql.Error {
+    println((row.get("email") !? sql.Value.null()).to_string())
+    return true
+}) ! panic("%{E.message}")
+```
 
 #### exec
 
@@ -639,6 +660,10 @@ Gives a connection back. One beyond `max_idle` is closed instead of kept.
     + fn all() Array[Map[Value]] !Error
     // Returns the values of the statement, in the order its placeholders take them.
     + fn args() Array[Value]
+    // Runs the query a page at a time, handing each page to `handler`.
+    + fn chunk(size: uint, handler: fn(Array[Map[Value]])(bool !Error)) uint !Error
+    // Runs the query a page at a time, walking forward by the last value of `column`.
+    + fn chunk_by_id(column: String, size: uint, handler: fn(Array[Map[Value]])(bool !Error)) uint !Error
     // Runs the same query as a count, without its order, limit and offset.
     + fn count(expression: String ("*")) uint !Error
     // Starts a `DELETE FROM`.
@@ -742,6 +767,48 @@ Runs the statement and returns every row.
 #### args
 
 Returns the values of the statement, in the order its placeholders take them.
+
+#### chunk
+
+Runs the query a page at a time, handing each page to `handler`.
+
+Every page is a query of its own, with a `LIMIT` and an `OFFSET`, so the connection is
+free between pages: the handler may write, and may use the same database. Returns how
+many rows were handed over in total, and stops early when the handler returns false.
+
+The query needs an `order_by` to mean anything, since a database is free to return rows
+in another order each time. Rows that are inserted or deleted while this runs shift the
+pages under it, and a deep offset gets slower the further it goes: `chunk_by_id` has
+neither problem and is the one to use on a table that is being written.
+
+```valk
+db.select().from("users").order_by("id").chunk(500, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+    each rows as row : send_email(row)
+    return true
+}) ! panic("%{E.message}")
+```
+
+#### chunk_by_id
+
+Runs the query a page at a time, walking forward by the last value of `column`.
+
+Each page asks for the rows after the last one of the page before it
+(`WHERE column > last ORDER BY column LIMIT size`), which is what makes this safe on a
+table that is being written: no row is skipped or seen twice because rows were inserted
+or deleted in between, and the database can use the index on `column` instead of counting
+its way to a deep offset.
+
+`column` must be unique and never decrease — a primary key or a `uuid.v7()` is exactly
+that. The order of the query is set by this method; any `order_by` on it is replaced.
+
+```valk
+db.select().from("users").chunk_by_id("id", 500, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+    each rows as row {
+        db.exec("UPDATE users SET checked = 1 WHERE id = ?", .{ row.get("id") !? sql.Value.null() }) !>
+    }
+    return true
+}) ! panic("%{E.message}")
+```
 
 #### count
 

@@ -303,3 +303,101 @@ test "A transaction without a closure" {
     }
     assert(false)
 }
+
+test "Walking a result in chunks" {
+    let driver = fake()
+    let db = fake_db(driver)
+
+    // Three rows per page, and a result that runs out on the second page
+    driver.answer = .{
+        row(.{ "id" => sql.Value.of_int(1) })
+        row(.{ "id" => sql.Value.of_int(2) })
+        row(.{ "id" => sql.Value.of_int(3) })
+    }
+    let pages: Array[uint] = .{}
+    let seen = db.select().from("t").order_by("id").chunk(3, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+        pages.append(rows.length)
+        // The second page is the last one, so shorten the answer
+        driver.answer = .{ row(.{ "id" => sql.Value.of_int(4) }) }
+        return true
+    }) ! { println(E.message) assert(false) return }
+    assert(seen == 4)
+    assert(pages.length == 2)
+
+    // Every page is its own statement, with a limit and an offset
+    assert((driver.statements.get(0) !? "").ends_with("LIMIT 3"))
+    assert((driver.statements.get(1) !? "").ends_with("LIMIT 3 OFFSET 3"))
+
+    // A handler that says stop is not asked again
+    driver.statements.clear()
+    driver.answer = .{ row(.{ "id" => sql.Value.of_int(1) }), row(.{ "id" => sql.Value.of_int(2) }) }
+    let stopped = db.select().from("t").order_by("id").chunk(2, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+        return false
+    }) ! { assert(false) return }
+    assert(stopped == 2)
+    assert(driver.statements.length == 1)
+
+    // A chunk of nothing would never end
+    db.select().from("t").chunk(0, fn(rows: Array[Map[sql.Value]]) bool !sql.Error { return true }) ! {
+        assert(error_is(E.code, error))
+        return
+    }
+    assert(false)
+}
+
+test "Walking by a column instead of an offset" {
+    let driver = fake()
+    let db = fake_db(driver)
+    driver.answer = .{ row(.{ "id" => sql.Value.of_int(7) }), row(.{ "id" => sql.Value.of_int(9) }) }
+
+    let rounds: Array[uint] = .{}
+    db.select().from("t").where("active = ?", .{ sql.Value.of_bool(true) }).chunk_by_id("id", 2, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+        rounds.append(rows.length)
+        if rounds.length == 1 : driver.answer = .{ row(.{ "id" => sql.Value.of_int(11) }) }
+        return true
+    }) ! { println(E.message) assert(false) return }
+    assert(rounds.length == 2)
+
+    // The first page asks for the caller's conditions, ordered by the column
+    let first = driver.statements.get(0) !? ""
+    assert(first == "SELECT * FROM t WHERE ((active = ?)) ORDER BY id LIMIT 2")
+    // The second asks for what comes after the last id of the first, conditions and all
+    let second = driver.statements.get(1) !? ""
+    assert(second == "SELECT * FROM t WHERE ((active = ?)) AND (id > ?) ORDER BY id LIMIT 2")
+    let second_args = driver.statement_args.get(1) !? .{}
+    assert(second_args.length == 2)
+    assert((second_args.get(1) !? sql.Value.null()).to_int() == 9)
+
+    // A column the rows do not have is an error rather than an endless walk
+    driver.answer = .{ row(.{ "other" => sql.Value.of_int(1) }) }
+    db.select().from("t").chunk_by_id("id", 2, fn(rows: Array[Map[sql.Value]]) bool !sql.Error { return true }) ! {
+        assert(error_is(E.code, error))
+        assert(E.message.contains("no column 'id'"))
+        return
+    }
+    assert(false)
+}
+
+test "Walking rows one at a time" {
+    let driver = fake()
+    let db = fake_db(driver)
+    driver.answer = .{
+        row(.{ "n" => sql.Value.of_int(1) })
+        row(.{ "n" => sql.Value.of_int(2) })
+        row(.{ "n" => sql.Value.of_int(3) })
+    }
+
+    let totals: Array[int] = .{}
+    let seen = db.each_row("SELECT n FROM t", .{}, fn(row: Map[sql.Value]) bool !sql.Error {
+        totals.append((row.get("n") !? sql.Value.null()).to_int())
+        return true
+    }) ! { println(E.message) assert(false) return }
+    assert(seen == 3)
+    assert(totals.sum() == 6)
+
+    // Stopping early stops the reading
+    let partial = db.each_row("SELECT n FROM t", .{}, fn(row: Map[sql.Value]) bool !sql.Error {
+        return false
+    }) ! { assert(false) return }
+    assert(partial == 1)
+}

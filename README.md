@@ -177,6 +177,51 @@ db.insert_into("counters")
 `on_conflict_nothing` keeps the row that is already there. The columns that decide what a clash
 is are what SQLite and Postgres need; MySQL works that out from its own indexes and ignores them.
 
+## Walking a large result
+
+`all()` holds every row in memory, which is fine for a page and wrong for a table. There are
+three ways to walk more rows than fit.
+
+`each_row` streams them one at a time, straight from the connection:
+
+```rust
+db.each_row("SELECT id, email FROM users", .{}, fn(row: Map[sql.Value]) bool !sql.Error {
+    send_email(row)
+    return true                      // false stops the walk
+}) ! panic("%{E.message}")
+```
+
+Nothing else may run on that connection while it walks: a statement sent in the middle takes the
+connection, and the walk then throws rather than quietly stopping halfway. For a walk that
+writes, take a page at a time instead.
+
+`chunk` runs the query again per page, with a `LIMIT` and an `OFFSET`, so the connection is free
+in between:
+
+```rust
+db.select().from("users").order_by("id").chunk(500, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+    each rows as row : send_email(row)
+    return true
+}) ! panic("%{E.message}")
+```
+
+`chunk_by_id` walks forward by a column instead of counting rows, which is the one to use on a
+table that is being written:
+
+```rust
+db.select().from("users").chunk_by_id("id", 500, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+    each rows as row {
+        db.exec("UPDATE users SET checked = 1 WHERE id = ?", .{ row.get("id") !? sql.Value.null() }) !>
+    }
+    return true
+}) ! panic("%{E.message}")
+```
+
+Each page asks for `column > the last value seen`, so a row inserted or deleted while the walk
+runs cannot make it skip a row or see one twice — which an `OFFSET` can — and the database uses
+the index on that column instead of counting its way to a deep offset. The column must be unique
+and never decrease: a primary key, or a `uuid.v7()`. The order is set by the method.
+
 ## Rows into your own classes
 
 ```rust

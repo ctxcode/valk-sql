@@ -1,0 +1,137 @@
+extend Db {
+    /// Walks the rows of a statement one at a time, without holding them all in memory.
+    ///
+    /// The handler is given each row and returns whether to carry on, so it can stop early.
+    /// Returns how many rows it saw.
+    ///
+    /// The rows arrive from the connection as they are read, so **nothing else may run on that
+    /// connection while the walk is going**: a statement sent in the middle of it ends the walk.
+    /// A walk that has to write belongs in `chunk` or `chunk_by_id`, which read a page at a time
+    /// and leave the connection free in between.
+    ///
+    /// ```valk
+    /// db.each_row("SELECT id, email FROM users", .{}, fn(row: Map[sql.Value]) bool !sql.Error {
+    ///     println((row.get("email") !? sql.Value.null()).to_string())
+    ///     return true
+    /// }) ! panic("%{E.message}")
+    /// ```
+    + fn each_row(sql: String, args: Array[Value] (.{}), handler: fn(Map[Value])(bool !Error)) uint !Error {
+        let rows = this.query(sql, args) !>
+        let row: Map[Value] = .{}
+        let seen: uint = 0
+        while true {
+            let found = rows.next(row) ! {
+                rows.close()
+                throw E
+            }
+            if !found : break
+            seen++
+            let carry_on = handler(row) ! {
+                rows.close()
+                throw E
+            }
+            if !carry_on : break
+        }
+        rows.close()
+        return seen
+    }
+}
+
+extend Query {
+    /// Runs the query a page at a time, handing each page to `handler`.
+    ///
+    /// Every page is a query of its own, with a `LIMIT` and an `OFFSET`, so the connection is
+    /// free between pages: the handler may write, and may use the same database. Returns how
+    /// many rows were handed over in total, and stops early when the handler returns false.
+    ///
+    /// The query needs an `order_by` to mean anything, since a database is free to return rows
+    /// in another order each time. Rows that are inserted or deleted while this runs shift the
+    /// pages under it, and a deep offset gets slower the further it goes: `chunk_by_id` has
+    /// neither problem and is the one to use on a table that is being written.
+    ///
+    /// ```valk
+    /// db.select().from("users").order_by("id").chunk(500, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+    ///     each rows as row : send_email(row)
+    ///     return true
+    /// }) ! panic("%{E.message}")
+    /// ```
+    + fn chunk(size: uint, handler: fn(Array[Map[Value]])(bool !Error)) uint !Error {
+        if size == 0 : throw .error { message: "A chunk of 0 rows would never end" }
+        let db = this.database() !>
+        let seen: uint = 0
+        let page: uint = 0
+        while true {
+            this.limit(size)
+            this.offset(page * size)
+            let statement, args = this.build(db.dialect)
+            let rows = rows_of(db.driver.query(statement, args) !>) !>
+            if rows.length == 0 : return seen
+            seen += rows.length
+            let carry_on = handler(rows) !>
+            if !carry_on : return seen
+            if rows.length < size : return seen
+            page++
+        }
+    }
+
+    /// Runs the query a page at a time, walking forward by the last value of `column`.
+    ///
+    /// Each page asks for the rows after the last one of the page before it
+    /// (`WHERE column > last ORDER BY column LIMIT size`), which is what makes this safe on a
+    /// table that is being written: no row is skipped or seen twice because rows were inserted
+    /// or deleted in between, and the database can use the index on `column` instead of counting
+    /// its way to a deep offset.
+    ///
+    /// `column` must be unique and never decrease — a primary key or a `uuid.v7()` is exactly
+    /// that. The order of the query is set by this method; any `order_by` on it is replaced.
+    ///
+    /// ```valk
+    /// db.select().from("users").chunk_by_id("id", 500, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+    ///     each rows as row {
+    ///         db.exec("UPDATE users SET checked = 1 WHERE id = ?", .{ row.get("id") !? sql.Value.null() }) !>
+    ///     }
+    ///     return true
+    /// }) ! panic("%{E.message}")
+    /// ```
+    + fn chunk_by_id(column: String, size: uint, handler: fn(Array[Map[Value]])(bool !Error)) uint !Error {
+        if size == 0 : throw .error { message: "A chunk of 0 rows would never end" }
+        let db = this.database() !>
+        let seen: uint = 0
+        let after = Value.null()
+        // The conditions of the caller are kept; the walk adds one of its own per page
+        let conditions = this.conditions
+        this.order_by(column)
+        this.limit(size)
+        this.offset(0)
+
+        while true {
+            // Every page asks for the caller's conditions and the rows after the last one seen.
+            // The caller's conditions go in as one group, so an `OR` inside them stays together.
+            let walk = Conditions {}
+            if conditions.length > 0 {
+                walk.parts.append(ConditionPart { joiner: "AND", group: conditions })
+            }
+            if !after.is_null() : walk.where(column + " > ?", .{ after })
+            this.conditions = walk
+
+            let statement, args = this.build(db.dialect)
+            let rows = rows_of(db.driver.query(statement, args) !>) !>
+            this.conditions = conditions
+            if rows.length == 0 : return seen
+            seen += rows.length
+
+            let last = rows.get(rows.length - 1) !? .{}
+            let next_after = last.get(column) ! {
+                throw .error { message: "The rows of this query have no column '" + column + "' to walk by" }
+            }
+            if next_after.is_null() {
+                throw .error { message: "The column '" + column + "' is NULL in a row, so the walk cannot go on from it" }
+            }
+            after = next_after
+
+            let carry_on = handler(rows) !>
+            if !carry_on : return seen
+            if rows.length < size : return seen
+        }
+    }
+}

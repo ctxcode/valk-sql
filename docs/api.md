@@ -92,6 +92,8 @@ Namespaces: [main](#main)
     + fn delete_from(table: String) Query
     // Which database is on the other end.
     + get dialect: Dialect
+    // Walks the rows of a statement one at a time, without holding them all in memory.
+    + fn each_row(sql: String, args: Array[Value] (.{}), handler: fn(Map[Value])(bool !Error)) uint !Error
     // Runs a statement that reads no rows, and returns how many rows it changed.
     + fn exec(sql: String, args: Array[Value] (.{})) uint !Error
     // Starts an `INSERT INTO` on this database.
@@ -212,6 +214,10 @@ Namespaces: [main](#main)
     + fn all() Array[Map[Value]] !Error
     // Returns the values of the statement, in the order its placeholders take them.
     + fn args() Array[Value]
+    // Runs the query a page at a time, handing each page to `handler`.
+    + fn chunk(size: uint, handler: fn(Array[Map[Value]])(bool !Error)) uint !Error
+    // Runs the query a page at a time, walking forward by the last value of `column`.
+    + fn chunk_by_id(column: String, size: uint, handler: fn(Array[Map[Value]])(bool !Error)) uint !Error
     // Runs the same query as a count, without its order, limit and offset.
     + fn count(expression: String ("*")) uint !Error
     // Starts a `DELETE FROM`.
