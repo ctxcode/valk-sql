@@ -247,7 +247,7 @@ table that is being written:
 ```rust
 db.select().from("users").chunk_by_id("id", 500, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
     each rows as row {
-        db.exec("UPDATE users SET checked = 1 WHERE id = ?", .{ row.get("id") !? sql.Value.null() }) !>
+        db.exec("UPDATE users SET checked = 1 WHERE id = :id", .{ "id" => row.get("id") !? sql.Value.null() }) !>
     }
     return true
 }) ! panic("%{E.message}")
