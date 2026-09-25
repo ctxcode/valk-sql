@@ -19,8 +19,8 @@ Namespaces: [main](#main)
 ```js
 // Which database is on the other end, and so how a statement is written.
 + enum Dialect { sqlite, mysql, postgres }
-// What a value holds. Every database this package speaks to has these five.
-+ enum TYPE { null, bool, int, float, text, blob }
+// What a value holds. Every database this package speaks to has the first six; a `list` is only ever an argument, which a statement expands into one value per item.
++ enum TYPE { null, bool, int, float, text, blob, list }
 ```
 
 ## Functions for 'main'
@@ -28,16 +28,14 @@ Namespaces: [main](#main)
 ```js
 // Converts any supported value (integers, floats, bools, text, json values, and nullable versions of those) into a `Value`.
 + fn convert(ndata: $T) Value
-// Returns `?, ?, ?` for `count` values, to write an `IN (...)` list by hand.
-+ fn placeholders(count: uint) String
-// Rewrites the `?` placeholders of a statement for `dialect`.
-+ fn rewrite(sql: String, dialect: Dialect) String
+// Turns the `:name` placeholders of `statement` into the placeholders of `dialect` (`?`, or `$1`, `$2`, ... for Postgres) and returns the values in their order.
++ fn named(statement: String, values: ?Map[Value], dialect: Dialect (Dialect.sqlite)) (String, Array[Value]) !Error
 // Reads a row into a class or struct of your own.
-+ fn row_to[T](row: Map[Value], bool_columns: Array[String] (.{})) T !Error
++ fn row_to[T](row: Map[Value], bool_columns: ?Array[String] (null)) T !Error
 // Returns the row as a JSON object, for an answer that goes straight out as JSON.
-+ fn row_to_json_value(row: Map[Value], bool_columns: Array[String] (.{})) Value
++ fn row_to_json_value(row: Map[Value], bool_columns: ?Array[String] (null)) Value
 // Reads every row into a class or struct of your own, as `row_to` does for one.
-+ fn rows_to[T](rows: Array[Map[Value]], bool_columns: Array[String] (.{})) Array[T] !Error
++ fn rows_to[T](rows: Array[Map[Value]], bool_columns: ?Array[String] (null)) Array[T] !Error
 ```
 
 ## Classes for 'main'
@@ -51,24 +49,28 @@ Namespaces: [main](#main)
     + get length: uint
     // Adds a group of conditions with `OR`, written in brackets.
     + fn or_group(build: fn(Conditions)()) Conditions
-    // Adds a condition with `OR`.
-    + fn or_where(condition: String, args: Array[Value] (.{})) Conditions
+    // The same, joined with `OR`.
+    + fn or_where(column: String, operator_or_value: ?Value, value: ?Value (not_given())) Conditions
     // The same with `OR`.
     + fn or_where_in(column: String, values: Array[Value]) Conditions
     // Adds `column IS NOT NULL` with `OR`.
     + fn or_where_not_null(column: String) Conditions
     // Adds `column IS NULL` with `OR`.
     + fn or_where_null(column: String) Conditions
-    // Adds a condition with `AND`.
-    + fn where(condition: String, args: Array[Value] (.{})) Conditions
-    // Adds `column IN (?, ?, …)` with `AND`. An empty list matches nothing.
+    // The same, joined with `OR`.
+    + fn or_where_raw(condition: String, values: ?Map[Value] (null)) Conditions
+    // Adds `column = value` with `AND`, or `column <operator> value` when given three arguments.
+    + fn where(column: String, operator_or_value: ?Value, value: ?Value (not_given())) Conditions
+    // Adds `column IN (...)` with `AND`. An empty list matches nothing.
     + fn where_in(column: String, values: Array[Value]) Conditions
-    // Adds `column NOT IN (?, ?, …)` with `AND`. An empty list matches everything.
+    // Adds `column NOT IN (...)` with `AND`. An empty list matches everything.
     + fn where_not_in(column: String, values: Array[Value]) Conditions
     // Adds `column IS NOT NULL` with `AND`.
     + fn where_not_null(column: String) Conditions
     // Adds `column IS NULL` with `AND`.
     + fn where_null(column: String) Conditions
+    // Adds a condition written in SQL, with `AND`, for what `where` cannot say. Values go in by name, as in `Db.exec`.
+    + fn where_raw(condition: String, values: ?Map[Value] (null)) Conditions
 }
 ```
 
@@ -79,7 +81,7 @@ Namespaces: [main](#main)
     + driver: Driver
 
     // Runs a statement and returns every row it answered with.
-    + fn all(sql: String, args: Array[Value] (.{})) Array[Map[Value]] !Error
+    + fn all(statement: String, values: ?Map[Value] (null)) Array[Map[Value]] !Error
     // Opens a transaction.
     + fn begin(immediate: bool (false)) void !Error
     // Opens a transaction and hands it back, for work that does not fit in a closure.
@@ -93,9 +95,9 @@ Namespaces: [main](#main)
     // Which database is on the other end.
     + get dialect: Dialect
     // Walks the rows of a statement one at a time, without holding them all in memory.
-    + fn each_row(sql: String, args: Array[Value] (.{}), handler: fn(Map[Value])(bool !Error)) uint !Error
+    + fn each_row(statement: String, values: ?Map[Value], handler: fn(Map[Value])(bool !Error)) uint !Error
     // Runs a statement that reads no rows, and returns how many rows it changed.
-    + fn exec(sql: String, args: Array[Value] (.{})) uint !Error
+    + fn exec(statement: String, values: ?Map[Value] (null)) uint !Error
     // Starts an `INSERT INTO` on this database.
     + fn insert_into(table: String) Query
     // The id the last insert wrote. SQLite and MySQL fill this in; Postgres has no such counter, so ask it for the id with `INSERT ... RETURNING id` instead.
@@ -103,11 +105,11 @@ Namespaces: [main](#main)
     // Wraps a driver. Drivers call this; a program calls the driver's own function.
     + static fn new(driver: Driver) Db
     // Runs a statement and returns its first row, or null when it answered with none.
-    + fn one(sql: String, args: Array[Value] (.{})) ?Map[Value] !Error
+    + fn one(statement: String, values: ?Map[Value] (null)) ?Map[Value] !Error
     // Returns whether the connection still answers.
     + fn ping() bool
     // Runs a statement and returns its rows, to be read one at a time with `Rows.next`.
-    + fn query(sql: String, args: Array[Value] (.{})) Rows !Error
+    + fn query(statement: String, values: ?Map[Value] (null)) Rows !Error
     // Rolls the open transaction back.
     + fn rollback() void !Error
     // Starts a `SELECT` on this database.
@@ -117,7 +119,7 @@ Namespaces: [main](#main)
     // Starts an `UPDATE` on this database.
     + fn update(table: String) Query
     // Runs a statement that answers with one value, and returns it. NULL when there is no row.
-    + fn value(sql: String, args: Array[Value] (.{})) Value !Error
+    + fn value(statement: String, values: ?Map[Value] (null)) Value !Error
 }
 ```
 
@@ -226,20 +228,22 @@ Namespaces: [main](#main)
     + fn from(table: String) Query
     // Adds a `GROUP BY`.
     + fn group_by(columns: String) Query
-    // Adds a `HAVING` condition with `AND`.
-    + fn having(condition: String, args: Array[Value] (.{})) Query
+    // Adds a `HAVING` condition with `AND`, as `where` does: `having("count(*)", ">", 5)`.
+    + fn having(column: String, operator_or_value: ?Value, value: ?Value (not_given())) Query
     // Adds a group of `HAVING` conditions, written in brackets.
     + fn having_group(build: fn(Conditions)()) Query
+    // Adds a `HAVING` condition written in SQL, with `AND`; values go in by name.
+    + fn having_raw(condition: String, values: ?Map[Value] (null)) Query
     // Adds `INNER JOIN <table> ON <condition>`.
-    + fn inner_join(table: String, condition: String, args: Array[Value] (.{})) Query
+    + fn inner_join(table: String, condition: String, values: ?Map[Value] (null)) Query
     // Starts an `INSERT INTO`.
     + static fn insert_into(table: String) Query
-    // Adds a join, written as it is: `join("LEFT JOIN posts ON posts.user_id = users.id")`.
-    + fn join(clause: String, args: Array[Value] (.{})) Query
+    // Adds a join, written as it is: `join("LEFT JOIN posts ON posts.user_id = users.id")`. Values go in by name, as in `Db.exec`.
+    + fn join(clause: String, values: ?Map[Value] (null)) Query
     // Adds `JOIN <table> ON <condition>`.
-    + fn join_on(table: String, condition: String, args: Array[Value] (.{})) Query
+    + fn join_on(table: String, condition: String, values: ?Map[Value] (null)) Query
     // Adds `LEFT JOIN <table> ON <condition>`, which keeps the rows that match nothing.
-    + fn left_join(table: String, condition: String, args: Array[Value] (.{})) Query
+    + fn left_join(table: String, condition: String, values: ?Map[Value] (null)) Query
     // Adds a `LIMIT`.
     + fn limit(count: uint) Query
     // Adds an `OFFSET`.
@@ -247,17 +251,21 @@ Namespaces: [main](#main)
     // Binds the query to a database, so that it can run itself.
     + fn on(db: Db) Query
     // On a row that clashes with one that is already there, keeps the row that is there.
-    + fn on_conflict_nothing(columns: Array[String] (.{})) Query
+    + fn on_conflict_nothing(columns: ?Array[String] (null)) Query
     // On a row that clashes with one that is already there, writes the new values over it.
-    + fn on_conflict_update(columns: Array[String], update_columns: Array[String] (.{})) Query
+    + fn on_conflict_update(columns: Array[String], update_columns: ?Array[String] (null)) Query
     // Runs the statement and returns its first row, or null.
     + fn one() ?Map[Value] !Error
-    // Adds a `HAVING` condition with `OR`.
-    + fn or_having(condition: String, args: Array[Value] (.{})) Query
-    // Adds a condition with `OR`.
-    + fn or_where(condition: String, args: Array[Value] (.{})) Query
+    // The same, joined with `OR`.
+    + fn or_having(column: String, operator_or_value: ?Value, value: ?Value (not_given())) Query
+    // The same, joined with `OR`.
+    + fn or_having_raw(condition: String, values: ?Map[Value] (null)) Query
+    // The same, joined with `OR`.
+    + fn or_where(column: String, operator_or_value: ?Value, value: ?Value (not_given())) Query
     // Adds a group of conditions with `OR`, written in brackets.
     + fn or_where_group(build: fn(Conditions)()) Query
+    // The same, joined with `OR`.
+    + fn or_where_raw(condition: String, values: ?Map[Value] (null)) Query
     // Adds an `ORDER BY`, written as it is: `order_by("name ASC, id DESC")`.
     + fn order_by(columns: String) Query
     // Takes one page of rows: page 1 is the first `per_page` rows, page 2 the next, and so on.
@@ -270,8 +278,8 @@ Namespaces: [main](#main)
     + static fn select(columns: String ("*")) Query
     // Sets a column of an `UPDATE`.
     + fn set(column: String, value: Value) Query
-    // Sets a column of an `UPDATE` to an expression, such as `balance + ?`.
-    + fn set_expression(column: String, expression: String, args: Array[Value] (.{})) Query
+    // Sets a column of an `UPDATE` to an expression, with values by name.
+    + fn set_expression(column: String, expression: String, values: ?Map[Value] (null)) Query
     // Sets several columns of an `UPDATE`.
     + fn set_many(values: Map[Value]) Query
     // Writes the statement for `dialect`.
@@ -282,18 +290,20 @@ Namespaces: [main](#main)
     + fn value() Value !Error
     // Adds a row to an `INSERT`. Every row must have the same columns.
     + fn values(row: Map[Value]) Query
-    // Adds a condition with `AND`.
-    + fn where(condition: String, args: Array[Value] (.{})) Query
+    // Adds `column = value` with `AND`, or `column <operator> value` with three arguments; see `Conditions.where` for the operators, null and lists.
+    + fn where(column: String, operator_or_value: ?Value, value: ?Value (not_given())) Query
     // Adds a group of conditions with `AND`, written in brackets, for a query that mixes `AND` and `OR`.
     + fn where_group(build: fn(Conditions)()) Query
-    // Adds `column IN (?, ?, …)` with one placeholder per value. An empty list matches nothing.
+    // Adds `column IN (...)` with one placeholder per value. An empty list matches nothing.
     + fn where_in(column: String, values: Array[Value]) Query
-    // Adds `column NOT IN (?, ?, …)`. An empty list matches everything.
+    // Adds `column NOT IN (...)`. An empty list matches everything.
     + fn where_not_in(column: String, values: Array[Value]) Query
     // Adds `column IS NOT NULL`.
     + fn where_not_null(column: String) Query
     // Adds `column IS NULL`.
     + fn where_null(column: String) Query
+    // Adds a condition written in SQL, with `AND`; values go in by name.
+    + fn where_raw(condition: String, values: ?Map[Value] (null)) Query
 }
 ```
 
@@ -316,7 +326,7 @@ Namespaces: [main](#main)
     ~ open: bool
 
     // Runs a statement and returns every row.
-    + fn all(sql: String, args: Array[Value] (.{})) Array[Map[Value]] !Error
+    + fn all(statement: String, values: ?Map[Value] (null)) Array[Map[Value]] !Error
     // Rolls the work back unless it was committed. Made for `defer`, so it throws nothing.
     + fn close() void
     // Commits the work. The transaction is closed afterwards.
@@ -324,15 +334,15 @@ Namespaces: [main](#main)
     // Starts a `DELETE FROM` on this transaction.
     + fn delete_from(table: String) Query
     // Runs a statement that reads no rows, and returns how many rows it changed.
-    + fn exec(sql: String, args: Array[Value] (.{})) uint !Error
+    + fn exec(statement: String, values: ?Map[Value] (null)) uint !Error
     // Starts an `INSERT INTO` on this transaction.
     + fn insert_into(table: String) Query
     // The id the last insert wrote, where the database has one.
     + fn last_insert_id() int
     // Runs a statement and returns its first row, or null.
-    + fn one(sql: String, args: Array[Value] (.{})) ?Map[Value] !Error
+    + fn one(statement: String, values: ?Map[Value] (null)) ?Map[Value] !Error
     // Runs a statement and returns its rows, to be read one at a time.
-    + fn query(sql: String, args: Array[Value] (.{})) Rows !Error
+    + fn query(statement: String, values: ?Map[Value] (null)) Rows !Error
     // Rolls the work back. The transaction is closed afterwards.
     + fn rollback() void !Error
     // Starts a `SELECT` on this transaction.
@@ -340,7 +350,7 @@ Namespaces: [main](#main)
     // Starts an `UPDATE` on this transaction.
     + fn update(table: String) Query
     // Runs a statement that answers with one value, and returns it.
-    + fn value(sql: String, args: Array[Value] (.{})) Value !Error
+    + fn value(statement: String, values: ?Map[Value] (null)) Value !Error
 }
 ```
 
@@ -350,6 +360,8 @@ Namespaces: [main](#main)
     + bool_value: bool
     + float_value: float
     + int_value: int
+    // The items of a list.
+    + items: ?Array[Value]
     // The bytes of a text or blob value.
     + text: String
     // Which of the kinds this value is.
