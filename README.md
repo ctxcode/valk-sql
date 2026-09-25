@@ -32,10 +32,10 @@ use sqlite
 let db = sqlite.database(sqlite.open("app.db") ! panic("%{E.message}"))
 defer db.close()
 
-// Statements are written with `?` whatever the database is; Postgres gets $1, $2 on the way out
-db.exec("INSERT INTO users (name, age) VALUES (?, ?)", .{ sql.Value.of("Ada"), sql.Value.of_int(36) }) ! panic("%{E.message}")
+// Values go in by name, whatever the database is; they are bound, never pasted in
+db.exec("INSERT INTO users (name, age) VALUES (:name, :age)", .{ "name" => "Ada", "age" => 36 }) ! panic("%{E.message}")
 
-let rows = db.all("SELECT * FROM users WHERE age > ?", .{ sql.Value.of_int(18) }) ! panic("%{E.message}")
+let rows = db.all("SELECT * FROM users WHERE age > :age", .{ "age" => 18 }) ! panic("%{E.message}")
 each rows as row {
     println((row.get("name") !? sql.Value.null()).to_string())
 }
@@ -66,8 +66,28 @@ value.to_bool()
 value.to_json()
 ```
 
-Values going in are made with `sql.Value.of`, `of_int`, `of_float`, `of_bool` and `of_blob`, or
-with `sql.convert(x)` for whatever a variable happens to hold.
+Numbers, text, bools, JSON values and arrays of them turn into values by themselves. A blob is
+made with `sql.Value.of_blob`, and `sql.convert(x)` converts whatever a variable holds.
+
+## Values by name
+
+Every statement takes its values by name. A name may appear more than once, and an array becomes
+a list, so an `IN` takes any number of ids from one placeholder:
+
+```rust
+let orders = db.all("SELECT * FROM orders WHERE customer = :who AND status IN (:statuses) OR referrer = :who", .{
+    "who" => 7
+    "statuses" => Array[String]{ "new", "paid" }
+}) ! panic("%{E.message}")
+
+let found = db.all("SELECT * FROM users WHERE id IN (:ids)", .{ "ids" => ids }) ! panic("%{E.message}")
+```
+
+An empty list becomes `NULL`, so `IN (:ids)` matches nothing and `NOT IN (:ids)` matches nothing
+either. Text in quotes and Postgres casts such as `::int` are left alone, and a `?` of your own,
+such as the Postgres JSON operator, stays what it is. A name without a value throws `syntax`.
+`sql.named(statement, values, dialect)` does the conversion by itself, for code that passes the
+statement on.
 
 ## The query builder
 
@@ -78,14 +98,30 @@ query, so a query reads as one chain:
 let rows = db.select("users.name, count(posts.id) AS posts")
     .from("users")
     .join("LEFT JOIN posts ON posts.user_id = users.id")
-    .where("users.active = ?", .{ sql.Value.of_bool(true) })
-    .where_in("users.id", ids)
+    .where("users.active", true)
+    .where("users.id", ids)
     .group_by("users.id")
-    .having("count(posts.id) > ?", .{ sql.Value.of_int(2) })
+    .having("count(posts.id)", ">", 2)
     .order_by("posts DESC")
     .limit(10)
     .all() ! panic("%{E.message}")
 ```
+
+`where` takes a column and a value, or a column, an operator and a value:
+
+```rust
+query.where("name", "Ada")                  // name = ?
+query.where("age", ">=", 18)                // =, !=, <>, <, >, <=, >=, like, not like, ilike, not ilike
+query.where("deleted_at", null)             // deleted_at IS NULL
+query.where("banned_at", "!=", null)        // banned_at IS NOT NULL
+query.where("id", ids)                      // id IN (...)
+query.where("team", "not in", teams)        // team NOT IN (...)
+query.where_raw("lower(email) = :email", .{ "email" => email })
+```
+
+The column is written as it is given, so `users.id` works; it must come from your program, never
+from the input it handles. What `where` cannot say goes into `where_raw`, with values by name.
+A mistake, such as an operator it does not know, is thrown as `syntax` when the query runs.
 
 ## Mixing AND and OR
 
@@ -96,10 +132,10 @@ brackets in, so what binds to what is never left to precedence:
 // WHERE (active = ?) AND ((role = ?) OR (score > ?))
 let rows = db.select()
     .from("users")
-    .where("active = ?", .{ sql.Value.of_bool(true) })
+    .where("active", true)
     .where_group(fn(w: sql.Conditions) {
-        w.where("role = ?", .{ sql.Value.of("admin") })
-        w.or_where("score > ?", .{ sql.Value.of_int(100) })
+        w.where("role", "admin")
+        w.or_where("score", ">", 100)
     })
     .all() ! panic("%{E.message}")
 ```
@@ -109,22 +145,23 @@ Groups nest, so the other shape — `OR` of two `AND`s — reads the same way:
 ```rust
 // WHERE ((role = ?) AND (active = ?)) OR ((role = ?) AND ((score > ?) OR (score IS NULL)))
 query.where_group(fn(w: sql.Conditions) {
-    w.where("role = ?", .{ sql.Value.of("admin") })
-    w.where("active = ?", .{ sql.Value.of_bool(true) })
+    w.where("role", "admin")
+    w.where("active", true)
 })
 query.or_where_group(fn(w: sql.Conditions) {
-    w.where("role = ?", .{ sql.Value.of("owner") })
+    w.where("role", "owner")
     w.group(fn(inner: sql.Conditions) {
-        inner.where("score > ?", .{ sql.Value.of_int(50) })
+        inner.where("score", ">", 50)
         inner.or_where_null("score")
     })
 })
 ```
 
-Inside a group the methods are `where`, `or_where`, `group`, `or_group`, `where_in`,
-`where_not_in`, `where_null`, `or_where_null`, `where_not_null` and `or_where_not_null`. Values
-come out in the order the placeholders take them, however deep the nesting goes, and `HAVING`
-mixes the same way with `having`, `or_having` and `having_group`.
+Inside a group the methods are `where`, `or_where`, `where_raw`, `or_where_raw`, `group`,
+`or_group`, `where_in`, `where_not_in`, `where_null`, `or_where_null`, `where_not_null` and
+`or_where_not_null`. Values come out in the order the placeholders take them, however deep the
+nesting goes, and `HAVING` mixes the same way with `having`, `or_having`, `having_raw` and
+`having_group`.
 
 `run()` is for writes, `all()`, `one()` and `value()` for reads, and `to_sql(dialect)` returns
 the statement without running it, which is what makes the builder easy to test. Writes are built
@@ -132,20 +169,19 @@ the same way:
 
 ```rust
 db.insert_into("users")
-    .values(.{ "name" => sql.Value.of("Ada"), "age" => sql.Value.of_int(36) })
+    .values(.{ "name" => "Ada", "age" => 36 })
     .run() ! panic("%{E.message}")
 
 db.update("users")
-    .set("active", sql.Value.of_bool(false))
-    .where("id = ?", .{ sql.Value.of_int(7) })
+    .set("active", false)
+    .set_expression("visits", "visits + :step", .{ "step" => 1 })
+    .where("id", 7)
     .run() ! panic("%{E.message}")
 
 db.delete_from("users")
-    .where("id = ?", .{ sql.Value.of_int(7) })
+    .where("id", 7)
     .run() ! panic("%{E.message}")
 ```
-
-Conditions are text on purpose: the builder saves the placeholder bookkeeping, not SQL itself.
 
 ## Joins, pages and upserts
 
@@ -164,7 +200,7 @@ right one:
 
 ```rust
 db.insert_into("counters")
-    .values(.{ "name" => sql.Value.of("visits"), "n" => sql.Value.of_int(1) })
+    .values(.{ "name" => "visits", "n" => 1 })
     .on_conflict_update(.{ "name" }, .{ "n" })
     .run() ! panic("%{E.message}")
 
@@ -185,7 +221,7 @@ three ways to walk more rows than fit.
 `each_row` streams them one at a time, straight from the connection:
 
 ```rust
-db.each_row("SELECT id, email FROM users", .{}, fn(row: Map[sql.Value]) bool !sql.Error {
+db.each_row("SELECT id, email FROM users", null, fn(row: Map[sql.Value]) bool !sql.Error {
     send_email(row)
     return true                      // false stops the walk
 }) ! panic("%{E.message}")
@@ -247,8 +283,8 @@ throws:
 
 ```rust
 db.transaction(fn(tx: sql.Db) !sql.Error {
-    tx.exec("UPDATE accounts SET balance = balance - ? WHERE id = ?", .{ sql.Value.of_int(10), sql.Value.of_int(1) }) !>
-    tx.exec("UPDATE accounts SET balance = balance + ? WHERE id = ?", .{ sql.Value.of_int(10), sql.Value.of_int(2) }) !>
+    tx.exec("UPDATE accounts SET balance = balance - :amount WHERE id = :id", .{ "amount" => 10, "id" => 1 }) !>
+    tx.exec("UPDATE accounts SET balance = balance + :amount WHERE id = :id", .{ "amount" => 10, "id" => 2 }) !>
 }) ! panic("%{E.message}")
 ```
 
@@ -260,11 +296,11 @@ the function — an early return, a thrown error, a panic:
 let tx = db.begin_transaction() ! panic("%{E.message}")
 defer tx.close()
 
-tx.exec("UPDATE accounts SET balance = balance - ? WHERE id = ?", .{ amount, from }) !>
-if (tx.value("SELECT balance FROM accounts WHERE id = ?", .{ from }) !>).to_int() < 0 {
+tx.exec("UPDATE accounts SET balance = balance - :amount WHERE id = :id", .{ "amount" => amount, "id" => from }) !>
+if (tx.value("SELECT balance FROM accounts WHERE id = :id", .{ "id" => from }) !>).to_int() < 0 {
     return "not enough money"      // the defer rolls it back
 }
-tx.exec("UPDATE accounts SET balance = balance + ? WHERE id = ?", .{ amount, to }) !>
+tx.exec("UPDATE accounts SET balance = balance + :amount WHERE id = :id", .{ "amount" => amount, "id" => to }) !>
 tx.commit() !>
 ```
 
@@ -333,17 +369,27 @@ Measured against SQLite in memory, 50 000 rows, best of three (`bench/` in valk-
 
 | | driver | through sql |
 | --- | --- | --- |
-| 50 000 inserts in one transaction | 19 ms | 12 ms |
-| reading 50 000 rows of 3 columns | 7 ms | 8 ms |
-| 50 000 single-row selects | 23 ms | 23 ms |
+| 50 000 inserts in one transaction | 13 ms | 15 ms |
+| reading 50 000 rows of 3 columns | 4 ms | 5 ms |
+| 50 000 single-row selects | 16 ms | 21 ms |
 
-Reading is within noise of the driver because the adapter fills the row straight from the
-statement rather than building the driver's own row first. Writing is faster here than the
-driver's named-placeholder form, which builds a map per statement. Against a database on a
-socket, all of this disappears into the round trip.
+Both sides take their values by name. A `Db` remembers the statements it has run (256 of them),
+so a statement it saw before skips reading its names again; what is left is about a tenth of a
+microsecond per statement for the map of values. Reading fills the row straight from the
+statement rather than building the driver's own row first. Against a database on a socket, all
+of this disappears into the round trip.
 
 The driver's own API is untouched and stays available for the paths where every allocation
 counts: `sqlite.Connection` and the others work exactly as before.
+
+## Upgrading from 0.2
+
+- Statements take their values by name: `db.exec("... WHERE id = :id", .{ "id" => 7 })` where it
+  was `db.exec("... WHERE id = ?", .{ 7 })`. `?` is no longer a placeholder.
+- `where("age > ?", .{ 18 })` is `where("age", ">", 18)`, and `where("id = ?", .{ 7 })` is
+  `where("id", 7)`. A condition that needs SQL goes into `where_raw` with values by name; the same
+  holds for `having`, `set_expression` and the joins.
+- `sql.rewrite` and `sql.placeholders` are gone: a list is an array bound to one name.
 
 ## Development
 

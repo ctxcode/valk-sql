@@ -37,17 +37,20 @@
 /// A database, whichever driver is behind it.
 ///
 /// A driver package hands one of these out (`sqlite.database(con)`, `postgres.database(con)`,
-/// `mysql.database(con)`), and everything in this package works with it. Statements are written
-/// with `?` placeholders whatever the database is; the values are bound, never pasted in.
+/// `mysql.database(con)`), and everything in this package works with it. Values go into a
+/// statement by name, `:name`, whatever the database is; they are bound, never pasted in. An
+/// array becomes a list, so `IN (:ids)` takes any number of ids.
 ///
 /// ```valk
 /// let db = sqlite.database(con)
-/// db.exec("INSERT INTO users (name, age) VALUES (?, ?)", .{ "Ada", 36 }) ! panic("%{E.message}")
-/// let rows = db.all("SELECT * FROM users WHERE age > ?", .{ 18 }) ! panic("%{E.message}")
+/// db.exec("INSERT INTO users (name, age) VALUES (:name, :age)", .{ "name" => "Ada", "age" => 36 }) ! panic("%{E.message}")
+/// let rows = db.all("SELECT * FROM users WHERE age > :age", .{ "age" => 18 }) ! panic("%{E.message}")
 /// ```
 + class Db {
     /// The driver behind this database.
     + driver: Driver
+    // Statements seen before: their text for the driver and the order of their names
+    - statements: ?Map[NamedStatement] (null)
 
     /// Wraps a driver. Drivers call this; a program calls the driver's own function.
     + static fn new(driver: Driver) Db {
@@ -59,19 +62,69 @@
         return this.driver.dialect
     }
 
+    // The text for the driver and the values in order. A statement seen before skips the scan,
+    // unless a value is a list, whose length decides the text.
+    - fn prepare(statement: String, values: ?Map[Value]) (String, Array[Value]) !Error {
+        if !statement.contains_byte(':') : return (statement, no_values)
+        let named_values = values ?? no_named_values
+        let known = this.statements
+        if isset(known) {
+            let seen = known.get(statement) !? null
+            if isset(seen) {
+                let names = seen.names
+                let args = Array[Value].new(names.length)
+                let listed = false
+                each names as name {
+                    let value = named_values.get(name) ! {
+                        throw .syntax { message: "No value for the placeholder ':" + name + "'", sql: statement }
+                    }
+                    if value.type == TYPE.list {
+                        listed = true
+                        break
+                    }
+                    args.append(value)
+                }
+                if !listed : return (seen.text, args)
+            }
+        }
+        let args = Array[Value]{}
+        let text = bind_named(statement, values, args, this.driver.dialect) !>
+        if args.length == 0 : return (text, no_values)
+        this.remember(statement, text, args)
+        return (text, args)
+    }
+
+    // Keeps a statement whose values were all single, with the names in the order they were taken
+    - fn remember(statement: String, text: String, args: Array[Value]) {
+        let names = named_order(statement)
+        if names.length != args.length : return
+        let known = this.statements ?? <{
+            let created = Map[NamedStatement]{}
+            this.statements = created
+            return created
+        }
+        // A program that builds its statements from input would fill it without end
+        if known.length >= STATEMENT_CACHE : known.clear()
+        known.set(statement, NamedStatement { text: text, names: names })
+    }
+
     /// Runs a statement that reads no rows, and returns how many rows it changed.
-    + fn exec(sql: String, args: Array[Value] (.{})) uint !Error {
-        return this.driver.exec(rewrite(sql, this.driver.dialect), args) !>
+    ///
+    /// `values` fill the `:name` placeholders; see `named` for the rules.
+    + fn exec(statement: String, values: ?Map[Value] (null)) uint !Error {
+        let text, args = this.prepare(statement, values) !>
+        return this.driver.exec(text, args) !>
     }
 
     /// Runs a statement and returns its rows, to be read one at a time with `Rows.next`.
-    + fn query(sql: String, args: Array[Value] (.{})) Rows !Error {
-        return this.driver.query(rewrite(sql, this.driver.dialect), args) !>
+    + fn query(statement: String, values: ?Map[Value] (null)) Rows !Error {
+        let text, args = this.prepare(statement, values) !>
+        return this.driver.query(text, args) !>
     }
 
     /// Runs a statement and returns every row it answered with.
-    + fn all(sql: String, args: Array[Value] (.{})) Array[Map[Value]] !Error {
-        let rows = this.query(sql, args) !>
+    + fn all(statement: String, values: ?Map[Value] (null)) Array[Map[Value]] !Error {
+        let rows = this.query(statement, values) !>
         let out: Array[Map[Value]] = .{}
         while true {
             let row: Map[Value] = .{}
@@ -83,8 +136,8 @@
     }
 
     /// Runs a statement and returns its first row, or null when it answered with none.
-    + fn one(sql: String, args: Array[Value] (.{})) ?Map[Value] !Error {
-        let rows = this.query(sql, args) !>
+    + fn one(statement: String, values: ?Map[Value] (null)) ?Map[Value] !Error {
+        let rows = this.query(statement, values) !>
         let row: Map[Value] = .{}
         let found = rows.next(row) ! { rows.close() throw E }
         rows.close()
@@ -97,8 +150,8 @@
     /// ```valk
     /// let total = (db.value("SELECT count(*) FROM users") ! panic("%{E.message}")).to_int()
     /// ```
-    + fn value(sql: String, args: Array[Value] (.{})) Value !Error {
-        let row = this.one(sql, args) !>
+    + fn value(statement: String, values: ?Map[Value] (null)) Value !Error {
+        let row = this.one(statement, values) !>
         if !isset(row) : return Value.null()
         each row as value : return value
         return Value.null()
@@ -131,8 +184,8 @@
     ///
     /// ```valk
     /// db.transaction(fn(tx: sql.Db) !sql.Error {
-    ///     tx.exec("UPDATE accounts SET balance = balance - ? WHERE id = ?", .{ 10, 1 }) !>
-    ///     tx.exec("UPDATE accounts SET balance = balance + ? WHERE id = ?", .{ 10, 2 }) !>
+    ///     tx.exec("UPDATE accounts SET balance = balance - :amount WHERE id = :id", .{ "amount" => 10, "id" => 1 }) !>
+    ///     tx.exec("UPDATE accounts SET balance = balance + :amount WHERE id = :id", .{ "amount" => 10, "id" => 2 }) !>
     /// }) ! panic("%{E.message}")
     /// ```
     + fn transaction(work: fn(Db)(!Error), immediate: bool (false)) !Error {
@@ -175,36 +228,10 @@
     }
 }
 
-/// Rewrites the `?` placeholders of a statement for `dialect`.
-///
-/// SQLite and MySQL take `?` as it is; Postgres wants `$1`, `$2`, ... Text in quotes is left
-/// alone, so a `?` inside a string stays what it was.
-+ fn rewrite(sql: String, dialect: Dialect) String {
-    if dialect != Dialect.postgres : return sql
-    if !sql.contains_byte('?') : return sql
+// How many statements a Db remembers
+value STATEMENT_CACHE (256)
 
-    let out = ByteBuffer.new(sql.length + 8)
-    let index: uint = 0
-    let i: uint = 0
-    let length = sql.length
-    while i < length {
-        let ch = sql[i++]
-        if ch == '\'' || ch == '"' {
-            // Copy quoted text as it is; a doubled quote inside re-enters and leaves it
-            out.write_byte(ch)
-            while i < length {
-                let quoted = sql[i++]
-                out.write_byte(quoted)
-                if quoted == ch : break
-            }
-            continue
-        }
-        if ch == '?' {
-            out.write_byte('$')
-            out.write_uint_ascii(++index)
-            continue
-        }
-        out.write_byte(ch)
-    }
-    return out.to_string()
+class NamedStatement {
+    text: String
+    names: Array[String]
 }

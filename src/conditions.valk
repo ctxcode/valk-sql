@@ -1,122 +1,277 @@
-// One part of a `WHERE` or `HAVING`: a piece of SQL with its values, or a group of parts.
+// What a ConditionPart holds
+value PART_COMPARE (0) // column operator value
+value PART_TEST (1)    // column followed by fixed text, such as ` IS NULL`
+value PART_IN (2)      // column [NOT] IN (list)
+value PART_RAW (3)     // SQL of the caller, with a mark per value
+value PART_GROUP (4)
+
+// One part of a `WHERE` or `HAVING`. Its text is written straight into the statement when the
+// query is built, so adding a condition allocates nothing but the part itself.
 class ConditionPart {
-    // How this part joins the one before it
-    joiner: String ("AND")
+    or: bool (false)
+    kind: u8 (PART_COMPARE)
+    column: String ("")
+    // The operator of a comparison, or the fixed text of a test; always a literal
+    operator: String ("")
+    value: Value (Value.null())
+    // The values of a list or a raw condition
+    values: ?Array[Value] (null)
     sql: String ("")
-    args: Array[Value] (.{})
     group: ?Conditions (null)
 }
 
 /// Conditions joined by `AND` and `OR`, with groups where the two are mixed.
 ///
-/// Every condition is written with `?` placeholders and its values passed next to it. A group is
+/// A condition compares a column with a value, which is always bound, never pasted in. A group is
 /// written in brackets, so what binds to what is never left to precedence:
 ///
 /// ```valk
-/// query.where("active = ?", .{ sql.Value.of_bool(true) })
+/// query.where("active", true)
 /// query.where_group(fn(w: sql.Conditions) {
-///     w.where("role = ?", .{ sql.Value.of("admin") })
-///     w.or_where("score > ?", .{ sql.Value.of_int(100) })
+///     w.where("role", "admin")
+///     w.or_where("score", ">", 100)
 /// })
 /// // WHERE (active = ?) AND ((role = ?) OR (score > ?))
 /// ```
 + class Conditions {
-    parts: Array[ConditionPart] (.{})
+    parts: ?Array[ConditionPart] (null)
+    // The first mistake in a condition, thrown when the query runs
+    problem: String ("")
 
     /// How many conditions this group holds.
     + get length: uint {
-        return this.parts.length
+        let parts = this.parts ?! return 0
+        return parts.length
     }
 
-    /// Adds a condition with `AND`.
-    + fn where(condition: String, args: Array[Value] (.{})) SELF {
-        this.parts.append(ConditionPart { joiner: "AND", sql: condition, args: args })
+    /// Adds `column = value` with `AND`, or `column <operator> value` when given three
+    /// arguments.
+    ///
+    /// The operators are `=`, `!=`, `<>`, `<`, `>`, `<=`, `>=`, `like`, `not like`, `ilike`,
+    /// `not ilike`, `in` and `not in`. A null value becomes `IS NULL` (`IS NOT NULL` with `!=`
+    /// or `<>`), and a list (an array) becomes `IN (...)`.
+    ///
+    /// ```valk
+    /// w.where("name", "Ada")
+    /// w.where("age", ">=", 18)
+    /// w.where("deleted_at", null)          // deleted_at IS NULL
+    /// w.where("id", ids)                   // id IN (...)
+    /// ```
+    ///
+    /// The column is written as it is given, so it may be `users.id`; it must come from the
+    /// program, never from the input it is handling.
+    + fn where(column: String, operator_or_value: ?Value, value: ?Value (not_given())) SELF {
+        this.add_comparison(false, column, operator_or_value, value)
         return this
     }
-    /// Adds a condition with `OR`.
-    + fn or_where(condition: String, args: Array[Value] (.{})) SELF {
-        this.parts.append(ConditionPart { joiner: "OR", sql: condition, args: args })
+    /// The same, joined with `OR`.
+    + fn or_where(column: String, operator_or_value: ?Value, value: ?Value (not_given())) SELF {
+        this.add_comparison(true, column, operator_or_value, value)
+        return this
+    }
+
+    /// Adds a condition written in SQL, with `AND`, for what `where` cannot say. Values go in by
+    /// name, as in `Db.exec`.
+    ///
+    /// ```valk
+    /// w.where_raw("lower(email) = :email OR phone = :phone", .{ "email" => email, "phone" => phone })
+    /// ```
+    + fn where_raw(condition: String, values: ?Map[Value] (null)) SELF {
+        this.add_raw(false, condition, values)
+        return this
+    }
+    /// The same, joined with `OR`.
+    + fn or_where_raw(condition: String, values: ?Map[Value] (null)) SELF {
+        this.add_raw(true, condition, values)
         return this
     }
 
     /// Adds a group of conditions with `AND`, written in brackets.
     + fn group(build: fn(Conditions)()) SELF {
-        return this.add_group("AND", build)
+        this.add_group(false, build)
+        return this
     }
     /// Adds a group of conditions with `OR`, written in brackets.
     + fn or_group(build: fn(Conditions)()) SELF {
-        return this.add_group("OR", build)
+        this.add_group(true, build)
+        return this
     }
 
-    /// Adds `column IN (?, ?, …)` with `AND`. An empty list matches nothing.
+    /// Adds `column IN (...)` with `AND`. An empty list matches nothing.
     + fn where_in(column: String, values: Array[Value]) SELF {
-        return this.add_in("AND", column, values, false)
+        this.add_in(false, column, values, false)
+        return this
     }
     /// The same with `OR`.
     + fn or_where_in(column: String, values: Array[Value]) SELF {
-        return this.add_in("OR", column, values, false)
+        this.add_in(true, column, values, false)
+        return this
     }
-    /// Adds `column NOT IN (?, ?, …)` with `AND`. An empty list matches everything.
+    /// Adds `column NOT IN (...)` with `AND`. An empty list matches everything.
     + fn where_not_in(column: String, values: Array[Value]) SELF {
-        return this.add_in("AND", column, values, true)
+        this.add_in(false, column, values, true)
+        return this
     }
 
     /// Adds `column IS NULL` with `AND`.
     + fn where_null(column: String) SELF {
-        return this.where(column + " IS NULL")
+        this.add(ConditionPart { kind: PART_TEST, column: column, operator: " IS NULL" })
+        return this
     }
     /// Adds `column IS NULL` with `OR`.
     + fn or_where_null(column: String) SELF {
-        return this.or_where(column + " IS NULL")
+        this.add(ConditionPart { or: true, kind: PART_TEST, column: column, operator: " IS NULL" })
+        return this
     }
     /// Adds `column IS NOT NULL` with `AND`.
     + fn where_not_null(column: String) SELF {
-        return this.where(column + " IS NOT NULL")
+        this.add(ConditionPart { kind: PART_TEST, column: column, operator: " IS NOT NULL" })
+        return this
     }
     /// Adds `column IS NOT NULL` with `OR`.
     + fn or_where_not_null(column: String) SELF {
-        return this.or_where(column + " IS NOT NULL")
+        this.add(ConditionPart { or: true, kind: PART_TEST, column: column, operator: " IS NOT NULL" })
+        return this
     }
 
-    fn add_group(joiner: String, build: fn(Conditions)()) SELF {
+    fn add_comparison(or: bool, column: String, operator_or_value: ?Value, given: ?Value) {
+        // Two arguments: the second is the value
+        if isset(given) && given.not_given {
+            if !isset(operator_or_value) || operator_or_value.type == TYPE.null {
+                this.add(ConditionPart { or: or, kind: PART_TEST, column: column, operator: " IS NULL" })
+                return
+            }
+            if operator_or_value.type == TYPE.list {
+                this.add_in(or, column, operator_or_value.items ?? Array[Value]{}, false)
+                return
+            }
+            this.add(ConditionPart { or: or, column: column, operator: "=", value: operator_or_value })
+            return
+        }
+        let written = isset(operator_or_value) ? operator_or_value.text : ""
+        let operator = sql_operator(written)
+        if operator.length == 0 {
+            this.note("'" + written + "' is not an operator 'where' takes; write the condition with where_raw")
+            return
+        }
+        let in = operator == "IN" || operator == "NOT IN"
+        if !isset(given) || given.type == TYPE.null {
+            if operator == "=" {
+                this.add(ConditionPart { or: or, kind: PART_TEST, column: column, operator: " IS NULL" })
+                return
+            }
+            if operator == "!=" || operator == "<>" {
+                this.add(ConditionPart { or: or, kind: PART_TEST, column: column, operator: " IS NOT NULL" })
+                return
+            }
+            if !in {
+                this.note("'" + column + " " + written + " null' is never true; compare with '=' or '!=' for IS NULL")
+                return
+            }
+        }
+        let value = given ?? Value.null()
+        if in {
+            let negated = operator == "NOT IN"
+            if value.type == TYPE.list : this.add_in(or, column, value.items ?? Array[Value]{}, negated)
+            else if value.type == TYPE.null : this.add_in(or, column, Array[Value]{}, negated)
+            else : this.add_in(or, column, Array[Value]{ value }, negated)
+            return
+        }
+        if value.type == TYPE.list {
+            this.note("A list goes with 'in' or 'not in', not with '" + written + "'")
+            return
+        }
+        this.add(ConditionPart { or: or, column: column, operator: operator, value: value })
+    }
+
+    fn add_raw(or: bool, condition: String, values: ?Map[Value]) {
+        let args = Array[Value]{}
+        let text = mark_named(condition, values, args) ! {
+            this.note(E.message)
+            return
+        }
+        this.add(ConditionPart { or: or, kind: PART_RAW, sql: text, values: args.length > 0 ? args : null })
+    }
+
+    fn add_group(or: bool, build: fn(Conditions)()) {
         let group = Conditions {}
         build(group)
+        if group.problem.length > 0 : this.note(group.problem)
         // A group nobody put anything in would write `()`
-        if group.length == 0 : return this
-        this.parts.append(ConditionPart { joiner: joiner, group: group })
-        return this
+        if group.length == 0 : return
+        this.add(ConditionPart { or: or, kind: PART_GROUP, group: group })
     }
 
-    fn add_in(joiner: String, column: String, values: Array[Value], negated: bool) SELF {
+    fn add_in(or: bool, column: String, values: Array[Value], negated: bool) {
         if values.length == 0 {
             // `IN ()` is not valid SQL; an empty list matches nothing, and `NOT IN ()` everything
-            return this.parts_append(joiner, negated ? "1 = 1" : "1 = 0", .{})
+            this.add(ConditionPart { or: or, kind: PART_RAW, sql: negated ? "1 = 1" : "1 = 0" })
+            return
         }
-        let sql = column + (negated ? " NOT IN (" : " IN (") + placeholders(values.length) + ")"
-        return this.parts_append(joiner, sql, values)
+        this.add(ConditionPart { or: or, kind: PART_IN, column: column, operator: negated ? " NOT IN (" : " IN (", values: values })
     }
 
-    fn parts_append(joiner: String, sql: String, args: Array[Value]) SELF {
-        this.parts.append(ConditionPart { joiner: joiner, sql: sql, args: args })
-        return this
+    fn add(part: ConditionPart) {
+        let parts = this.parts ?? <{
+            let created = Array[ConditionPart]{}
+            this.parts = created
+            return created
+        }
+        parts.append(part)
+    }
+
+    fn note(problem: String) {
+        if this.problem.length == 0 : this.problem = problem
     }
 
     // Writes the conditions and collects their values in the order the statement takes them
-    fn render(out: ByteBuffer, args: Array[Value]) {
-        each this.parts as part, index {
-            if index > 0 {
-                out.write_byte(' ')
-                out.write(part.joiner)
-                out.write_byte(' ')
-            }
+    fn render(out: ByteBuffer, args: Array[Value], dialect: Dialect) {
+        let parts = this.parts ?! return
+        each parts as part, index {
+            if index > 0 : out.write(part.or ? " OR " : " AND ")
             out.write_byte('(')
-            let group = part.group
-            if isset(group) : group.render(out, args)
-            else {
-                out.write(part.sql)
-                args.append_many(part.args)
+            let kind = part.kind
+            if kind == PART_COMPARE {
+                out.write(part.column)
+                out.write_byte(' ')
+                out.write(part.operator)
+                out.write_byte(' ')
+                write_placeholder(out, args, part.value, dialect)
+            } else if kind == PART_TEST {
+                out.write(part.column)
+                out.write(part.operator)
+            } else if kind == PART_IN {
+                out.write(part.column)
+                out.write(part.operator)
+                let values = part.values
+                if isset(values) {
+                    each values as value, i {
+                        if i > 0 : out.write(", ")
+                        write_placeholder(out, args, value, dialect)
+                    }
+                }
+                out.write_byte(')')
+            } else if kind == PART_RAW {
+                write_marked(out, args, part.sql, part.values, dialect)
+            } else {
+                let group = part.group
+                if isset(group) : group.render(out, args, dialect)
             }
             out.write_byte(')')
         }
     }
+}
+
+// The SQL text of an operator `where` takes, or "" for another one. No text is allocated: every
+// answer is a literal.
+fn sql_operator(written: String) String {
+    if written == "=" || written == "!=" || written == "<>" || written == "<" || written == ">" || written == "<=" || written == ">=" : return written
+    let view = written.view()
+    if view.equals_ignore_ascii_case("like") : return "LIKE"
+    if view.equals_ignore_ascii_case("not like") : return "NOT LIKE"
+    if view.equals_ignore_ascii_case("ilike") : return "ILIKE"
+    if view.equals_ignore_ascii_case("not ilike") : return "NOT ILIKE"
+    if view.equals_ignore_ascii_case("in") : return "IN"
+    if view.equals_ignore_ascii_case("not in") : return "NOT IN"
+    return ""
 }

@@ -1,0 +1,164 @@
+// Where a value goes in a fragment the builder keeps until it knows the dialect. A byte SQL text
+// never holds, so a `?` of the caller's own, such as the Postgres JSON operator, stays as it is.
+value MARK (1)
+
+// The values of a statement that has none; shared, so a statement without values allocates
+// nothing for them. Nothing may add to it.
+global no_values: Array[Value] (Array[Value]{})
+global no_named_values: Map[Value] (Map[Value]{})
+
+// The names of the placeholders of `statement`, in order, a name as often as it appears
+fn named_order(statement: String) Array[String] {
+    let names = Array[String]{}
+    let i: uint = 0
+    let length = statement.length
+    while i < length {
+        let ch = statement[i++]
+        if ch == '\'' || ch == '"' || ch == '`' {
+            while i < length {
+                if statement[i++] == ch : break
+            }
+            continue
+        }
+        if ch != ':' : continue
+        if i < length && statement[i] == ':' {
+            i++
+            continue
+        }
+        let start = i
+        while i < length && (statement[i].is_alpha_numeric() || statement[i] == '_') : i++
+        if i == start || statement[start].is_number() : continue
+        names.append(statement.range(start, i - start))
+    }
+    return names
+}
+
+/// Turns the `:name` placeholders of `statement` into the placeholders of `dialect` (`?`, or
+/// `$1`, `$2`, ... for Postgres) and returns the values in their order.
+///
+/// A name used twice takes its value twice, and a list (an array) becomes one placeholder per
+/// item, so `IN (:ids)` works for any number of ids; an empty list becomes `NULL`, which
+/// matches nothing. Text in quotes is left alone, and so is a Postgres cast such as `::int`.
+/// Throws `syntax` for a name `values` does not hold; values no placeholder names are left out.
+///
+/// `Db` does this for every statement; this is for code that passes a statement on.
+///
+/// ```valk
+/// let statement, args = sql.named("SELECT * FROM users WHERE id IN (:ids)", .{ "ids" => ids }) ! panic("%{E.message}")
+/// ```
++ fn named(statement: String, values: ?Map[Value], dialect: Dialect (Dialect.sqlite)) (String, Array[Value]) !Error {
+    let args = Array[Value]{}
+    let text = bind_named(statement, values, args, dialect) !>
+    return (text, args)
+}
+
+// The statement with the placeholders of `dialect`
+fn bind_named(statement: String, values: ?Map[Value], args: Array[Value], dialect: Dialect) String !Error {
+    if !statement.contains_byte(':') : return statement
+    let out = ByteBuffer.new(statement.length + 16)
+    scan_named(statement, values, out, args, dialect) !>
+    return out.to_string()
+}
+
+// The statement with a mark per value, for the builder, which numbers them later
+fn mark_named(statement: String, values: ?Map[Value], args: Array[Value]) String !Error {
+    if !statement.contains_byte(':') : return statement
+    let out = ByteBuffer.new(statement.length + 8)
+    scan_named(statement, values, out, args, null) !>
+    return out.to_string()
+}
+
+// Copies `statement` into `out` with a placeholder, or a mark when there is no dialect yet, for
+// every value its names take
+fn scan_named(statement: String, values: ?Map[Value], out: ByteBuffer, args: Array[Value], dialect: ?Dialect) !Error {
+    let i: uint = 0
+    let length = statement.length
+    while i < length {
+        let ch = statement[i++]
+        if ch == '\'' || ch == '"' || ch == '`' {
+            // Copy quoted text as it is; a doubled quote inside re-enters and leaves it
+            out.write_byte(ch)
+            while i < length {
+                let quoted = statement[i++]
+                out.write_byte(quoted)
+                if quoted == ch : break
+            }
+            continue
+        }
+        if ch != ':' {
+            out.write_byte(ch)
+            continue
+        }
+        // `::type` is a cast
+        if i < length && statement[i] == ':' {
+            out.write("::")
+            i++
+            continue
+        }
+        let start = i
+        while i < length && (statement[i].is_alpha_numeric() || statement[i] == '_') : i++
+        if i == start || statement[start].is_number() {
+            out.write_byte(ch)
+            continue
+        }
+        let name = statement.range(start, i - start)
+        let named_values = values ?! throw .syntax { message: "No value for the placeholder ':" + name + "'", sql: statement }
+        let value = named_values.get(name) ! {
+            throw .syntax { message: "No value for the placeholder ':" + name + "'", sql: statement }
+        }
+        place_value(out, args, value, dialect)
+    }
+}
+
+// A placeholder for a value, one per item for a list; an empty list is NULL, so `IN (:ids)`
+// matches nothing
+fn place_value(out: ByteBuffer, args: Array[Value], value: Value, dialect: ?Dialect) {
+    if value.type != TYPE.list {
+        if isset(dialect) {
+            write_placeholder(out, args, value, dialect)
+            return
+        }
+        out.write_byte(MARK)
+        args.append(value)
+        return
+    }
+    let items = value.items ?! {
+        out.write("NULL")
+        return
+    }
+    if items.length == 0 {
+        out.write("NULL")
+        return
+    }
+    each items as item, i {
+        if i > 0 : out.write(", ")
+        place_value(out, args, item, dialect)
+    }
+}
+
+// The placeholder of the next value: `?`, or `$n` for Postgres
+fn write_placeholder(out: ByteBuffer, args: Array[Value], value: Value, dialect: Dialect) {
+    args.append(value)
+    if dialect == Dialect.postgres {
+        out.write_byte('$')
+        out.write_uint_ascii(args.length)
+        return
+    }
+    out.write_byte('?')
+}
+
+// Copies a marked fragment with the placeholders of `dialect`, taking its values in order
+fn write_marked(out: ByteBuffer, args: Array[Value], text: String, values: ?Array[Value], dialect: Dialect) {
+    let list = values ?! {
+        out.write(text)
+        return
+    }
+    let next: uint = 0
+    each text as ch {
+        if ch != MARK {
+            out.write_byte(ch)
+            continue
+        }
+        write_placeholder(out, args, list.get(next++) !? Value.null(), dialect)
+    }
+}

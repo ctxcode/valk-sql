@@ -6,8 +6,8 @@ test "Building selects" {
 
     let query = db.select("id, name")
         .from("users")
-        .where("age > ?", .{ sql.Value.of_int(18) })
-        .where("active = ?", .{ sql.Value.of_bool(true) })
+        .where("age", ">", 18)
+        .where("active", true)
         .order_by("name ASC")
         .limit(10)
         .offset(20)
@@ -24,9 +24,9 @@ test "Building selects" {
     let report = sql.Query.select("users.name, count(posts.id) AS posts")
         .from("users")
         .join("LEFT JOIN posts ON posts.user_id = users.id")
-        .where("users.active = ?", .{ sql.Value.of_bool(true) })
+        .where("users.active", true)
         .group_by("users.id")
-        .having("count(posts.id) > ?", .{ sql.Value.of_int(2) })
+        .having("count(posts.id)", ">", 2)
         .order_by("posts DESC")
     assert(report.to_sql() == "SELECT users.name, count(posts.id) AS posts FROM users LEFT JOIN posts ON posts.user_id = users.id WHERE (users.active = ?) GROUP BY users.id HAVING (count(posts.id) > ?) ORDER BY posts DESC")
     // The values come out in the order the placeholders take them: joins, where, having
@@ -65,8 +65,8 @@ test "Building writes" {
 
     let update = sql.Query.update("users")
         .set("name", sql.Value.of("Bob"))
-        .set_expression("visits", "visits + ?", .{ sql.Value.of_int(1) })
-        .where("id = ?", .{ sql.Value.of_int(7) })
+        .set_expression("visits", "visits + :step", .{ "step" => 1 })
+        .where("id", 7)
     assert(update.to_sql() == "UPDATE users SET name = ?, visits = visits + ? WHERE (id = ?)")
     let update_args = update.args()
     assert(update_args.length == 3)
@@ -74,7 +74,7 @@ test "Building writes" {
     assert((update_args.get(0) !? sql.Value.null()).to_string() == "Bob")
     assert((update_args.get(2) !? sql.Value.null()).to_int() == 7)
 
-    let delete = sql.Query.delete_from("users").where("id = ?", .{ sql.Value.of_int(3) })
+    let delete = sql.Query.delete_from("users").where("id", 3)
     assert(delete.to_sql() == "DELETE FROM users WHERE (id = ?)")
 }
 
@@ -83,7 +83,7 @@ test "Running a built query" {
     let db = fake_db(driver)
     driver.answer = .{ row(.{ "id" => sql.Value.of_int(4), "name" => sql.Value.of("Ada") }) }
 
-    let rows = db.select().from("users").where("id = ?", .{ sql.Value.of_int(4) }).all() ! {
+    let rows = db.select().from("users").where("id", 4).all() ! {
         assert(false)
         return
     }
@@ -92,7 +92,7 @@ test "Running a built query" {
     assert((driver.statement_args.get(0) !? .{}).length == 1)
 
     // one() asks for a single row
-    let one = db.select().from("users").where("id = ?", .{ sql.Value.of_int(4) }).one() ! { assert(false) return }
+    let one = db.select().from("users").where("id", 4).one() ! { assert(false) return }
     assert(isset(one))
     assert((driver.statements.get(1) !? "").ends_with("LIMIT 1"))
 
@@ -102,7 +102,7 @@ test "Running a built query" {
 
     // run() is for writes
     driver.affected = 3
-    let changed = db.update("users").set("active", sql.Value.of_bool(false)).where("age < ?", .{ sql.Value.of_int(18) }).run() ! {
+    let changed = db.update("users").set("active", sql.Value.of_bool(false)).where("age", "<", 18).run() ! {
         assert(false)
         return
     }
@@ -158,18 +158,18 @@ test "Rows into classes" {
 test "Mixing AND and OR" {
     // `or_where` joins with OR, so a query can ask for either of two things
     let either = sql.Query.select().from("users")
-    either.where("role = ?", .{ sql.Value.of("admin") })
-    either.or_where("score > ?", .{ sql.Value.of_int(100) })
+    either.where("role", "admin")
+    either.or_where("score", ">", 100)
     assert(either.to_sql() == "SELECT * FROM users WHERE (role = ?) AND (score > ?)" || either.to_sql() == "SELECT * FROM users WHERE (role = ?) OR (score > ?)")
     assert(either.to_sql().contains(") OR ("))
 
     // A group keeps the OR together, so the AND outside it cannot be read into it
     let grouped = sql.Query.select()
         .from("users")
-        .where("active = ?", .{ sql.Value.of_bool(true) })
+        .where("active", true)
         .where_group(fn(w: sql.Conditions) {
-            w.where("role = ?", .{ sql.Value.of("admin") })
-            w.or_where("score > ?", .{ sql.Value.of_int(100) })
+            w.where("role", "admin")
+            w.or_where("score", ">", 100)
         })
     assert(grouped.to_sql() == "SELECT * FROM users WHERE (active = ?) AND ((role = ?) OR (score > ?))")
 
@@ -183,13 +183,13 @@ test "Mixing AND and OR" {
     // Groups inside groups, the other way around: OR of two ANDs
     let nested = sql.Query.select().from("users")
     nested.where_group(fn(w: sql.Conditions) {
-        w.where("role = ?", .{ sql.Value.of("admin") })
-        w.where("active = ?", .{ sql.Value.of_bool(true) })
+        w.where("role", "admin")
+        w.where("active", true)
     })
     nested.or_where_group(fn(w: sql.Conditions) {
-        w.where("role = ?", .{ sql.Value.of("owner") })
+        w.where("role", "owner")
         w.group(fn(inner: sql.Conditions) {
-            inner.where("score > ?", .{ sql.Value.of_int(50) })
+            inner.where("score", ">", 50)
             inner.or_where_null("score")
         })
     })
@@ -199,7 +199,7 @@ test "Mixing AND and OR" {
 
     // An empty group writes nothing at all
     let empty = sql.Query.select().from("t")
-    empty.where("a = ?", .{ sql.Value.of_int(1) })
+    empty.where("a", 1)
     empty.where_group(fn(w: sql.Conditions) {})
     assert(empty.to_sql() == "SELECT * FROM t WHERE (a = ?)")
 
@@ -216,8 +216,8 @@ test "Mixing AND and OR" {
     // Conditions on an UPDATE and a DELETE read the same way, and their values follow the SET
     let update = sql.Query.update("users")
     update.set("active", sql.Value.of_bool(false))
-    update.where("role = ?", .{ sql.Value.of("guest") })
-    update.or_where("score < ?", .{ sql.Value.of_int(10) })
+    update.where("role", "guest")
+    update.or_where("score", "<", 10)
     assert(update.to_sql() == "UPDATE users SET active = ? WHERE (role = ?) OR (score < ?)")
     let update_args = update.args()
     assert((update_args.get(0) !? sql.Value.null()).to_int() == 0)
@@ -226,8 +226,8 @@ test "Mixing AND and OR" {
     // HAVING mixes the same way
     let report = sql.Query.select("team, count(*) AS n").from("results")
     report.group_by("team")
-    report.having("count(*) > ?", .{ sql.Value.of_int(2) })
-    report.or_having("team = ?", .{ sql.Value.of("house") })
+    report.having("count(*)", ">", 2)
+    report.or_having("team", "house")
     assert(report.to_sql() == "SELECT team, count(*) AS n FROM results GROUP BY team HAVING (count(*) > ?) OR (team = ?)")
 
     // For Postgres the numbering follows the same order
@@ -351,7 +351,7 @@ test "Walking by a column instead of an offset" {
     driver.answer = .{ row(.{ "id" => sql.Value.of_int(7) }), row(.{ "id" => sql.Value.of_int(9) }) }
 
     let rounds: Array[uint] = .{}
-    db.select().from("t").where("active = ?", .{ sql.Value.of_bool(true) }).chunk_by_id("id", 2, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
+    db.select().from("t").where("active", true).chunk_by_id("id", 2, fn(rows: Array[Map[sql.Value]]) bool !sql.Error {
         rounds.append(rows.length)
         if rounds.length == 1 : driver.answer = .{ row(.{ "id" => sql.Value.of_int(11) }) }
         return true
@@ -400,4 +400,53 @@ test "Walking rows one at a time" {
         return false
     }) ! { assert(false) return }
     assert(partial == 1)
+}
+
+test "Where with a column, an operator and a value" {
+    let ids = Array[int]{ 4, 5 }
+    let query = sql.Query.select().from("users")
+        .where("name", "Ada")
+        .where("age", ">=", 18)
+        .where("email", "like", "%@example.com")
+        .where("deleted_at", null)
+        .where("banned_at", "!=", null)
+        .where("id", ids)
+        .where("team", "not in", Array[String]{ "x" })
+        .or_where_raw("lower(nick) = :nick OR role = :role", .{ "nick" => "ada", "role" => "admin" })
+    assert(query.to_sql() == "SELECT * FROM users WHERE (name = ?) AND (age >= ?) AND (email LIKE ?) AND (deleted_at IS NULL) AND (banned_at IS NOT NULL) AND (id IN (?, ?)) AND (team NOT IN (?)) OR (lower(nick) = ? OR role = ?)")
+    let values = query.args()
+    assert(values.length == 8)
+    assert((values.get(0) !? sql.Value.null()).to_string() == "Ada" && (values.get(3) !? sql.Value.null()).to_int() == 4)
+    assert((values.get(7) !? sql.Value.null()).to_string() == "admin")
+    assert(query.to_sql(sql.Dialect.postgres).ends_with("OR (lower(nick) = $7 OR role = $8)"))
+
+    // HAVING and joins take the same forms
+    let report = sql.Query.select("team, count(*) AS n").from("results")
+        .left_join("teams", "teams.id = results.team_id AND teams.season = :season", .{ "season" => 2026 })
+        .group_by("team")
+        .having("count(*)", ">", 2)
+        .or_having_raw("sum(points) > :points", .{ "points" => 100 })
+    assert(report.to_sql() == "SELECT team, count(*) AS n FROM results LEFT JOIN teams ON teams.id = results.team_id AND teams.season = ? GROUP BY team HAVING (count(*) > ?) OR (sum(points) > ?)")
+    assert(report.args().length == 3)
+}
+
+test "A mistake in a condition is thrown when the query runs" {
+    let driver = fake()
+    let db = fake_db(driver)
+    let operator = ""
+    db.select().from("users").where("age", "=>", 18).all() ! { operator = E.message }
+    assert(operator == "'=>' is not an operator 'where' takes; write the condition with where_raw")
+    let null_compare = ""
+    db.select().from("users").where("age", ">", null).all() ! { null_compare = E.message }
+    assert(null_compare.contains("is never true"))
+    let missing = ""
+    db.update("users").set_expression("visits", "visits + :step").where("id", 1).run() ! { missing = E.message }
+    assert(missing == "No value for the placeholder ':step'")
+    let grouped = ""
+    db.select().from("users").where_group(fn(w: sql.Conditions) {
+        w.where("role", "~", "x")
+    }).all() ! { grouped = E.message }
+    assert(grouped.starts_with("'~' is not an operator"))
+    // Nothing reached the database
+    assert(driver.statements.length == 0)
 }

@@ -6,7 +6,7 @@ test "Running statements" {
     assert(db.dialect == sql.Dialect.sqlite)
 
     // Values travel next to the statement, never inside it
-    let changed = db.exec("INSERT INTO users (name, age) VALUES (?, ?)", .{ sql.Value.of("Ada"), sql.Value.of_int(36) }) ! {
+    let changed = db.exec("INSERT INTO users (name, age) VALUES (:name, :age)", .{ "name" => "Ada", "age" => 36 }) ! {
         assert(false)
         return
     }
@@ -44,26 +44,25 @@ test "Running statements" {
     assert(driver.closed)
 }
 
-test "Placeholders are rewritten per database" {
-    // SQLite and MySQL take `?` as it is
-    assert(sql.rewrite("SELECT * FROM t WHERE a = ? AND b = ?", sql.Dialect.sqlite) == "SELECT * FROM t WHERE a = ? AND b = ?")
-    assert(sql.rewrite("SELECT * FROM t WHERE a = ?", sql.Dialect.mysql) == "SELECT * FROM t WHERE a = ?")
+test "Placeholders are written per database" {
+    // SQLite and MySQL take `?`, Postgres numbers them
+    let values: Map[sql.Value] = .{ "a" => 1, "b" => 2 }
+    let lite, _ = sql.named("SELECT * FROM t WHERE a = :a AND b = :b", values) ! { assert(false) return }
+    assert(lite == "SELECT * FROM t WHERE a = ? AND b = ?")
+    let my, _ = sql.named("SELECT * FROM t WHERE a = :a", values, sql.Dialect.mysql) ! { assert(false) return }
+    assert(my == "SELECT * FROM t WHERE a = ?")
+    let pg, _ = sql.named("SELECT * FROM t WHERE a = :a AND b = :b", values, sql.Dialect.postgres) ! { assert(false) return }
+    assert(pg == "SELECT * FROM t WHERE a = $1 AND b = $2")
 
-    // Postgres numbers them
-    assert(sql.rewrite("SELECT * FROM t WHERE a = ? AND b = ?", sql.Dialect.postgres) == "SELECT * FROM t WHERE a = $1 AND b = $2")
+    // A `?` of the statement's own, such as the Postgres JSON operator, stays as it is
+    let json, _ = sql.named("SELECT * FROM t WHERE data ? 'key' AND a = :a", values, sql.Dialect.postgres) ! { assert(false) return }
+    assert(json == "SELECT * FROM t WHERE data ? 'key' AND a = $1")
 
-    // A `?` inside text is not a placeholder
-    assert(sql.rewrite("SELECT '? ?' , a FROM t WHERE b = ?", sql.Dialect.postgres) == "SELECT '? ?' , a FROM t WHERE b = $1")
-    assert(sql.rewrite("SELECT \"we?ird\" FROM t WHERE b = ?", sql.Dialect.postgres) == "SELECT \"we?ird\" FROM t WHERE b = $1")
-
-    // A statement without placeholders is left alone
-    assert(sql.rewrite("SELECT 1", sql.Dialect.postgres) == "SELECT 1")
-
-    // And a query written through a Postgres database comes out numbered
+    // And a statement run through a Postgres database comes out numbered
     let driver = fake()
     driver.dialect_kind = sql.Dialect.postgres
     let db = fake_db(driver)
-    db.exec("DELETE FROM t WHERE a = ? AND b = ?", .{ sql.Value.of_int(1), sql.Value.of_int(2) }) ! { assert(false) return }
+    db.exec("DELETE FROM t WHERE a = :a AND b = :b", values) ! { assert(false) return }
     assert((driver.statements.get(0) !? "") == "DELETE FROM t WHERE a = $1 AND b = $2")
 }
 
@@ -113,4 +112,44 @@ test "Values" {
     assert(sql.convert(1.25).to_float() == 1.25)
     let missing: ?String = null
     assert(sql.convert(missing).is_null())
+}
+
+test "Named placeholders" {
+    let statement, args = sql.named("SELECT * FROM t WHERE a = :a AND b = :b OR a = :a", .{ "a" => 1, "b" => "x", "unused" => sql.Value.null() }) ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert(statement == "SELECT * FROM t WHERE a = ? AND b = ? OR a = ?")
+    assert(args.length == 3 && (args.get(2) !? sql.Value.null()).to_int() == 1)
+
+    // Quoted text, casts and times are not placeholders
+    let quoted, none = sql.named("SELECT ':a', \"x:y\", '12:30', v::int, :v::text FROM t", .{ "v" => "7" }) ! { assert(false) return }
+    assert(quoted == "SELECT ':a', \"x:y\", '12:30', v::int, ?::text FROM t")
+    assert(none.length == 1)
+
+    let missing = ""
+    sql.named("SELECT :nope", .{}) ! { missing = E.message }
+    assert(missing == "No value for the placeholder ':nope'")
+
+    // An array becomes a list, however long; an empty one is NULL
+    let ids = Array[int]{}
+    while ids.length < 1000 : ids.append(ids.length.to(int))
+    let listed, list_args = sql.named("SELECT * FROM t WHERE id IN (:ids)", .{ "ids" => ids }, sql.Dialect.postgres) ! { assert(false) return }
+    assert(list_args.length == 1000)
+    assert(listed.starts_with("SELECT * FROM t WHERE id IN ($1, $2, $3, ") && listed.ends_with(", $1000)"))
+    let no_ids = Array[int]{}
+    let empty, empty_args = sql.named("SELECT * FROM t WHERE id IN (:ids)", .{ "ids" => no_ids }) ! { assert(false) return }
+    assert(empty == "SELECT * FROM t WHERE id IN (NULL)" && empty_args.length == 0)
+
+    // Through a Db, for every kind of call
+    let driver = fake()
+    driver.dialect_kind = sql.Dialect.postgres
+    let db = fake_db(driver)
+    db.exec("UPDATE users SET name = :name WHERE id = :id", .{ "id" => 3, "name" => "Ada" }) ! { assert(false) return }
+    assert((driver.statements.get(0) !? "") == "UPDATE users SET name = $1 WHERE id = $2")
+    let sent = driver.statement_args.get(0) !? .{}
+    assert((sent.get(0) !? sql.Value.null()).to_string() == "Ada" && (sent.get(1) !? sql.Value.null()).to_int() == 3)
+    db.all("SELECT * FROM users WHERE id IN (:ids)", .{ "ids" => Array[int]{ 1, 2 } }) ! { assert(false) return }
+    assert((driver.statements.get(1) !? "") == "SELECT * FROM users WHERE id IN ($1, $2)")
 }

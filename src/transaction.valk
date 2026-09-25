@@ -7,11 +7,11 @@
 /// let tx = db.begin_transaction() ! panic("%{E.message}")
 /// defer tx.close()
 ///
-/// tx.exec("UPDATE accounts SET balance = balance - ? WHERE id = ?", .{ amount, from }) !>
-/// if (tx.value("SELECT balance FROM accounts WHERE id = ?", .{ from }) !>).to_int() < 0 {
+/// tx.exec("UPDATE accounts SET balance = balance - :amount WHERE id = :id", .{ "amount" => amount, "id" => from }) !>
+/// if (tx.value("SELECT balance FROM accounts WHERE id = :id", .{ "id" => from }) !>).to_int() < 0 {
 ///     return "not enough money"      // the defer rolls it back
 /// }
-/// tx.exec("UPDATE accounts SET balance = balance + ? WHERE id = ?", .{ amount, to }) !>
+/// tx.exec("UPDATE accounts SET balance = balance + :amount WHERE id = :id", .{ "amount" => amount, "id" => to }) !>
 /// tx.commit() !>
 /// ```
 ///
@@ -23,24 +23,24 @@
     ~ open: bool (true)
 
     /// Runs a statement that reads no rows, and returns how many rows it changed.
-    + fn exec(sql: String, args: Array[Value] (.{})) uint !Error {
-        return this.db.exec(sql, args) !>
+    + fn exec(statement: String, values: ?Map[Value] (null)) uint !Error {
+        return this.db.exec(statement, values) !>
     }
     /// Runs a statement and returns its rows, to be read one at a time.
-    + fn query(sql: String, args: Array[Value] (.{})) Rows !Error {
-        return this.db.query(sql, args) !>
+    + fn query(statement: String, values: ?Map[Value] (null)) Rows !Error {
+        return this.db.query(statement, values) !>
     }
     /// Runs a statement and returns every row.
-    + fn all(sql: String, args: Array[Value] (.{})) Array[Map[Value]] !Error {
-        return this.db.all(sql, args) !>
+    + fn all(statement: String, values: ?Map[Value] (null)) Array[Map[Value]] !Error {
+        return this.db.all(statement, values) !>
     }
     /// Runs a statement and returns its first row, or null.
-    + fn one(sql: String, args: Array[Value] (.{})) ?Map[Value] !Error {
-        return this.db.one(sql, args) !>
+    + fn one(statement: String, values: ?Map[Value] (null)) ?Map[Value] !Error {
+        return this.db.one(statement, values) !>
     }
     /// Runs a statement that answers with one value, and returns it.
-    + fn value(sql: String, args: Array[Value] (.{})) Value !Error {
-        return this.db.value(sql, args) !>
+    + fn value(statement: String, values: ?Map[Value] (null)) Value !Error {
+        return this.db.value(statement, values) !>
     }
     /// The id the last insert wrote, where the database has one.
     + fn last_insert_id() int {

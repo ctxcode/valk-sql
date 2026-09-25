@@ -20,13 +20,13 @@ use valk.json
 ///     nickname: ?String
 /// }
 ///
-/// let row = db.one("SELECT * FROM users WHERE id = ?", .{ 1 }) ! panic("%{E.message}")
+/// let row = db.one("SELECT * FROM users WHERE id = :id", .{ "id" => 1 }) ! panic("%{E.message}")
 /// if isset(row) {
 ///     let user = sql.row_to[User](row) ! panic("%{E.message}")
 ///     println(user.name)
 /// }
 /// ```
-+ fn row_to[T](row: Map[Value], bool_columns: Array[String] (.{})) T !Error {
++ fn row_to[T](row: Map[Value], bool_columns: ?Array[String] (null)) T !Error {
     let document: json.Value = json.new_object(row_to_json(row, bool_columns))
     return document.to_type[T]() ! {
         // The JSON decoder reports a LookupError, which carries no message of its own
@@ -35,7 +35,7 @@ use valk.json
 }
 
 /// Reads every row into a class or struct of your own, as `row_to` does for one.
-+ fn rows_to[T](rows: Array[Map[Value]], bool_columns: Array[String] (.{})) Array[T] !Error {
++ fn rows_to[T](rows: Array[Map[Value]], bool_columns: ?Array[String] (null)) Array[T] !Error {
     let out = Array[T].new(rows.length)
     each rows as row {
         out.append(row_to[T](row, bool_columns) !>)
@@ -44,7 +44,7 @@ use valk.json
 }
 
 /// Returns the row as a JSON object, for an answer that goes straight out as JSON.
-+ fn row_to_json_value(row: Map[Value], bool_columns: Array[String] (.{})) json.Value {
++ fn row_to_json_value(row: Map[Value], bool_columns: ?Array[String] (null)) json.Value {
     let document: json.Value = json.new_object(row_to_json(row, bool_columns))
     return document
 }
@@ -57,10 +57,10 @@ fn column_names(row: Map[Value]) String {
     return names.join(", ")
 }
 
-fn row_to_json(row: Map[Value], bool_columns: Array[String]) Map[json.Value] {
+fn row_to_json(row: Map[Value], bool_columns: ?Array[String]) Map[json.Value] {
     let values: Map[json.Value] = .{}
     each row as value, column {
-        if bool_columns.length > 0 && bool_columns.contains(column) {
+        if isset(bool_columns) && bool_columns.contains(column) {
             values.set(column, json.new_bool(value.to_bool()))
             continue
         }

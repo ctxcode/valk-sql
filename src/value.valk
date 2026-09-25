@@ -1,6 +1,7 @@
 use valk.json
 
-/// What a value holds. Every database this package speaks to has these five.
+/// What a value holds. Every database this package speaks to has the first six; a `list` is
+/// only ever an argument, which a statement expands into one value per item.
 + enum TYPE {
     null
     /// A real boolean, which Postgres has and SQLite and MySQL do not: those store 1 and 0, and
@@ -10,6 +11,8 @@ use valk.json
     float
     text
     blob
+    /// Several values, for `IN (:ids)`: an array converts to this.
+    list
 }
 
 /// One value: a cell of a row, or an argument of a statement.
@@ -23,6 +26,10 @@ use valk.json
     + bool_value: bool (false)
     /// The bytes of a text or blob value.
     + text: String ("")
+    /// The items of a list.
+    + items: ?Array[Value] (null)
+    // Marks an argument that was not given, as the default of an optional one
+    not_given: bool (false)
 
     /// Returns a NULL value.
     + static fn null() SELF $default {
@@ -155,6 +162,22 @@ extend json.Value {
     + fn to_sql_value() Value $auto {
         return Value.of(this.encode())
     }
+}
+extend Array[T] {
+    + fn to_sql_value() Value $auto {
+        #if T.$can_convert_to(Value) || T.$has_method(to_sql_value) || T.$is_type_of(Value)
+        let items = Array[Value].new(this.length)
+        each this as item : items.append(convert(item))
+        return Value { type: TYPE.list, items: items }
+        #else
+        #error "Only arrays of values that convert to a sql Value can be a list"
+        #end
+    }
+}
+
+// The default of an optional argument, told apart from an explicit null
+fn not_given() Value {
+    return Value { type: TYPE.null, not_given: true }
 }
 
 /// Converts any supported value (integers, floats, bools, text, json values, and nullable

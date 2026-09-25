@@ -102,7 +102,7 @@ use valk.time
                 throw E { message: "Migration '" + migration.name + "' failed: " + E.message, sql: statement }
             }
         }
-        db.exec("INSERT INTO " + this.table + " (name, applied_at) VALUES (?, ?)", .{ Value.of(migration.name), Value.of(time.DateTime.now().to_iso8601()) }) ! {
+        db.exec("INSERT INTO " + this.table + " (name, applied_at) VALUES (:name, :at)", .{ "name" => migration.name, "at" => time.DateTime.now().to_iso8601() }) ! {
             db.rollback() _
             throw E
         }

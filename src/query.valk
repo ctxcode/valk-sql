@@ -8,16 +8,33 @@ value QUERY_INSERT (1)
 value QUERY_UPDATE (2)
 value QUERY_DELETE (3)
 
+// A join: its fixed start, such as `LEFT JOIN `, then the rest, with a mark per value
+class Join {
+    start: String ("")
+    table: String ("")
+    condition: String ("")
+    values: ?Array[Value] (null)
+}
+
+// A column of an `UPDATE`: `column = value`, or `column = expression` with its values
+class Assignment {
+    column: String
+    value: Value (Value.null())
+    expression: String ("")
+    values: ?Array[Value] (null)
+}
+
 /// A statement built from its parts, with the values kept apart from the text.
 ///
-/// Conditions are written with `?` placeholders and their values passed next to them, so the
-/// values are always bound. `to_sql` writes the placeholders the dialect wants.
+/// Values are always bound, never pasted in; `to_sql` writes the placeholders the dialect
+/// wants. A mistake in a condition, such as an unknown operator, is thrown as `syntax` when the
+/// query runs.
 ///
 /// ```valk
 /// let rows = db.select("id, name")
 ///     .from("users")
-///     .where("age > ?", .{ 18 })
-///     .where("active = ?", .{ true })
+///     .where("age", ">", 18)
+///     .where("active", true)
 ///     .order_by("name")
 ///     .limit(10)
 ///     .all() ! panic("%{E.message}")
@@ -27,24 +44,24 @@ value QUERY_DELETE (3)
     db: ?Db (null)
     table: String ("")
     columns: String ("*")
-    joins: Array[String] (.{})
-    conditions: Conditions (.{})
-    assignments: Array[String] (.{})
-    insert_columns: Array[String] (.{})
+    // Every list is made when the first item arrives, so a query only pays for what it uses
+    joins: ?Array[Join] (null)
+    conditions: ?Conditions (null)
+    assignments: ?Array[Assignment] (null)
+    insert_columns: ?Array[String] (null)
+    insert_values: ?Array[Value] (null)
     insert_rows: uint (0)
     groups: String ("")
-    havings: Conditions (.{})
+    havings: ?Conditions (null)
     orders: String ("")
     returns: String ("")
     conflict_kind: uint (CONFLICT_NONE)
-    conflict_columns: Array[String] (.{})
-    conflict_updates: Array[String] (.{})
+    conflict_columns: ?Array[String] (null)
+    conflict_updates: ?Array[String] (null)
     row_limit: uint (0)
     row_offset: uint (0)
-    // The values, in the order the parts were added
-    join_args: Array[Value] (.{})
-    set_args: Array[Value] (.{})
-    insert_args: Array[Value] (.{})
+    // The first mistake outside the conditions, thrown when the query runs
+    problem: String ("")
 
     /// Starts a `SELECT`.
     + static fn select(columns: String ("*")) Query {
@@ -76,9 +93,9 @@ value QUERY_DELETE (3)
     }
 
     /// Adds a join, written as it is: `join("LEFT JOIN posts ON posts.user_id = users.id")`.
-    + fn join(clause: String, args: Array[Value] (.{})) SELF {
-        this.joins.append(clause)
-        this.join_args.append_many(args)
+    /// Values go in by name, as in `Db.exec`.
+    + fn join(clause: String, values: ?Map[Value] (null)) SELF {
+        this.add_join("", "", clause, values)
         return this
     }
 
@@ -87,35 +104,55 @@ value QUERY_DELETE (3)
     /// ```valk
     /// query.join_on("posts", "posts.user_id = users.id")
     /// ```
-    + fn join_on(table: String, condition: String, args: Array[Value] (.{})) SELF {
-        return this.join("JOIN " + table + " ON " + condition, args)
+    + fn join_on(table: String, condition: String, values: ?Map[Value] (null)) SELF {
+        this.add_join("JOIN ", table, condition, values)
+        return this
     }
     /// Adds `LEFT JOIN <table> ON <condition>`, which keeps the rows that match nothing.
-    + fn left_join(table: String, condition: String, args: Array[Value] (.{})) SELF {
-        return this.join("LEFT JOIN " + table + " ON " + condition, args)
+    + fn left_join(table: String, condition: String, values: ?Map[Value] (null)) SELF {
+        this.add_join("LEFT JOIN ", table, condition, values)
+        return this
     }
     /// Adds `INNER JOIN <table> ON <condition>`.
-    + fn inner_join(table: String, condition: String, args: Array[Value] (.{})) SELF {
-        return this.join("INNER JOIN " + table + " ON " + condition, args)
-    }
-
-    /// Adds a condition with `AND`.
-    ///
-    /// Each `?` in the condition takes the next value from `args`.
-    + fn where(condition: String, args: Array[Value] (.{})) SELF {
-        this.conditions.where(condition, args)
+    + fn inner_join(table: String, condition: String, values: ?Map[Value] (null)) SELF {
+        this.add_join("INNER JOIN ", table, condition, values)
         return this
     }
 
-    /// Adds a condition with `OR`.
+    /// Adds `column = value` with `AND`, or `column <operator> value` with three arguments; see
+    /// `Conditions.where` for the operators, null and lists.
     ///
     /// ```valk
-    /// query.where("role = ?", .{ sql.Value.of("admin") })
-    /// query.or_where("score > ?", .{ sql.Value.of_int(100) })
+    /// query.where("role", "admin")
+    /// query.where("age", ">=", 18)
+    /// query.where("id", ids)              // id IN (...)
+    /// ```
+    + fn where(column: String, operator_or_value: ?Value, value: ?Value (not_given())) SELF {
+        this.where_conditions().where(column, operator_or_value, value)
+        return this
+    }
+    /// The same, joined with `OR`.
+    ///
+    /// ```valk
+    /// query.where("role", "admin").or_where("score", ">", 100)
     /// // WHERE (role = ?) OR (score > ?)
     /// ```
-    + fn or_where(condition: String, args: Array[Value] (.{})) SELF {
-        this.conditions.or_where(condition, args)
+    + fn or_where(column: String, operator_or_value: ?Value, value: ?Value (not_given())) SELF {
+        this.where_conditions().or_where(column, operator_or_value, value)
+        return this
+    }
+    /// Adds a condition written in SQL, with `AND`; values go in by name.
+    ///
+    /// ```valk
+    /// query.where_raw("lower(email) = :email", .{ "email" => email })
+    /// ```
+    + fn where_raw(condition: String, values: ?Map[Value] (null)) SELF {
+        this.where_conditions().where_raw(condition, values)
+        return this
+    }
+    /// The same, joined with `OR`.
+    + fn or_where_raw(condition: String, values: ?Map[Value] (null)) SELF {
+        this.where_conditions().or_where_raw(condition, values)
         return this
     }
 
@@ -123,55 +160,62 @@ value QUERY_DELETE (3)
     /// and `OR`.
     ///
     /// ```valk
-    /// query.where("active = ?", .{ sql.Value.of_bool(true) })
+    /// query.where("active", true)
     /// query.where_group(fn(w: sql.Conditions) {
-    ///     w.where("role = ?", .{ sql.Value.of("admin") })
-    ///     w.or_where("score > ?", .{ sql.Value.of_int(100) })
+    ///     w.where("role", "admin")
+    ///     w.or_where("score", ">", 100)
     /// })
     /// // WHERE (active = ?) AND ((role = ?) OR (score > ?))
     /// ```
     + fn where_group(build: fn(Conditions)()) SELF {
-        this.conditions.group(build)
+        this.where_conditions().group(build)
         return this
     }
     /// Adds a group of conditions with `OR`, written in brackets.
     + fn or_where_group(build: fn(Conditions)()) SELF {
-        this.conditions.or_group(build)
+        this.where_conditions().or_group(build)
         return this
     }
 
-    /// Adds `column IN (?, ?, …)` with one placeholder per value. An empty list matches nothing.
+    /// Adds `column IN (...)` with one placeholder per value. An empty list matches nothing.
     + fn where_in(column: String, values: Array[Value]) SELF {
-        this.conditions.where_in(column, values)
+        this.where_conditions().where_in(column, values)
         return this
     }
-    /// Adds `column NOT IN (?, ?, …)`. An empty list matches everything.
+    /// Adds `column NOT IN (...)`. An empty list matches everything.
     + fn where_not_in(column: String, values: Array[Value]) SELF {
-        this.conditions.where_not_in(column, values)
+        this.where_conditions().where_not_in(column, values)
         return this
     }
 
     /// Adds `column IS NULL`.
     + fn where_null(column: String) SELF {
-        this.conditions.where_null(column)
+        this.where_conditions().where_null(column)
         return this
     }
     /// Adds `column IS NOT NULL`.
     + fn where_not_null(column: String) SELF {
-        this.conditions.where_not_null(column)
+        this.where_conditions().where_not_null(column)
         return this
     }
 
     /// Sets a column of an `UPDATE`.
     + fn set(column: String, value: Value) SELF {
-        this.assignments.append(column + " = ?")
-        this.set_args.append(value)
+        this.add_assignment(Assignment { column: column, value: value })
         return this
     }
-    /// Sets a column of an `UPDATE` to an expression, such as `balance + ?`.
-    + fn set_expression(column: String, expression: String, args: Array[Value] (.{})) SELF {
-        this.assignments.append(column + " = " + expression)
-        this.set_args.append_many(args)
+    /// Sets a column of an `UPDATE` to an expression, with values by name.
+    ///
+    /// ```valk
+    /// query.set_expression("balance", "balance + :amount", .{ "amount" => 10 })
+    /// ```
+    + fn set_expression(column: String, expression: String, values: ?Map[Value] (null)) SELF {
+        let args = Array[Value]{}
+        let text = mark_named(expression, values, args) ! {
+            this.note(E.message)
+            return this
+        }
+        this.add_assignment(Assignment { column: column, expression: text, values: args })
         return this
     }
     /// Sets several columns of an `UPDATE`.
@@ -184,13 +228,19 @@ value QUERY_DELETE (3)
 
     /// Adds a row to an `INSERT`. Every row must have the same columns.
     + fn values(row: Map[Value]) SELF {
-        if this.insert_rows == 0 {
-            each row as value, column {
-                this.insert_columns.append(column)
-            }
+        let columns = this.insert_columns ?? <{
+            let created = Array[String].new(row.length)
+            each row as value, column : created.append(column)
+            this.insert_columns = created
+            return created
         }
-        each this.insert_columns as column {
-            this.insert_args.append(row.get(column) !? Value.null())
+        let values = this.insert_values ?? <{
+            let created = Array[Value].new(columns.length)
+            this.insert_values = created
+            return created
+        }
+        each columns as column {
+            values.append(row.get(column) !? Value.null())
         }
         this.insert_rows++
         return this
@@ -201,19 +251,29 @@ value QUERY_DELETE (3)
         this.groups = columns
         return this
     }
-    /// Adds a `HAVING` condition with `AND`.
-    + fn having(condition: String, args: Array[Value] (.{})) SELF {
-        this.havings.where(condition, args)
+    /// Adds a `HAVING` condition with `AND`, as `where` does: `having("count(*)", ">", 5)`.
+    + fn having(column: String, operator_or_value: ?Value, value: ?Value (not_given())) SELF {
+        this.having_conditions().where(column, operator_or_value, value)
         return this
     }
-    /// Adds a `HAVING` condition with `OR`.
-    + fn or_having(condition: String, args: Array[Value] (.{})) SELF {
-        this.havings.or_where(condition, args)
+    /// The same, joined with `OR`.
+    + fn or_having(column: String, operator_or_value: ?Value, value: ?Value (not_given())) SELF {
+        this.having_conditions().or_where(column, operator_or_value, value)
+        return this
+    }
+    /// Adds a `HAVING` condition written in SQL, with `AND`; values go in by name.
+    + fn having_raw(condition: String, values: ?Map[Value] (null)) SELF {
+        this.having_conditions().where_raw(condition, values)
+        return this
+    }
+    /// The same, joined with `OR`.
+    + fn or_having_raw(condition: String, values: ?Map[Value] (null)) SELF {
+        this.having_conditions().or_where_raw(condition, values)
         return this
     }
     /// Adds a group of `HAVING` conditions, written in brackets.
     + fn having_group(build: fn(Conditions)()) SELF {
-        this.havings.group(build)
+        this.having_conditions().group(build)
         return this
     }
     /// Adds an `ORDER BY`, written as it is: `order_by("name ASC, id DESC")`.
@@ -251,11 +311,11 @@ value QUERY_DELETE (3)
     ///
     /// ```valk
     /// db.insert_into("counters")
-    ///     .values(.{ "name" => sql.Value.of("visits"), "n" => sql.Value.of_int(1) })
+    ///     .values(.{ "name" => "visits", "n" => 1 })
     ///     .on_conflict_update(.{ "name" }, .{ "n" })
     ///     .run() ! panic("%{E.message}")
     /// ```
-    + fn on_conflict_update(columns: Array[String], update_columns: Array[String] (.{})) SELF {
+    + fn on_conflict_update(columns: Array[String], update_columns: ?Array[String] (null)) SELF {
         this.conflict_columns = columns
         this.conflict_updates = update_columns
         this.conflict_kind = CONFLICT_UPDATE
@@ -263,7 +323,7 @@ value QUERY_DELETE (3)
     }
 
     /// On a row that clashes with one that is already there, keeps the row that is there.
-    + fn on_conflict_nothing(columns: Array[String] (.{})) SELF {
+    + fn on_conflict_nothing(columns: ?Array[String] (null)) SELF {
         this.conflict_columns = columns
         this.conflict_kind = CONFLICT_NOTHING
         return this
@@ -287,10 +347,50 @@ value QUERY_DELETE (3)
         return statement
     }
 
+    fn where_conditions() Conditions {
+        let conditions = this.conditions ?? <{
+            let created = Conditions {}
+            this.conditions = created
+            return created
+        }
+        return conditions
+    }
+    fn having_conditions() Conditions {
+        let havings = this.havings ?? <{
+            let created = Conditions {}
+            this.havings = created
+            return created
+        }
+        return havings
+    }
+
+    fn add_join(start: String, table: String, condition: String, values: ?Map[Value]) {
+        let args = Array[Value]{}
+        let text = mark_named(condition, values, args) ! {
+            this.note(E.message)
+            return
+        }
+        let joins = this.joins ?? <{
+            let created = Array[Join]{}
+            this.joins = created
+            return created
+        }
+        joins.append(Join { start: start, table: table, condition: text, values: args.length > 0 ? args : null })
+    }
+
+    fn add_assignment(assignment: Assignment) {
+        let assignments = this.assignments ?? <{
+            let created = Array[Assignment]{}
+            this.assignments = created
+            return created
+        }
+        assignments.append(assignment)
+    }
+
     // The statement and its values in one pass, so that a value always sits where its
     // placeholder does, however the conditions are nested
     fn build(dialect: Dialect) (String, Array[Value]) {
-        let args: Array[Value] = .{}
+        let args = Array[Value]{}
         let out = ByteBuffer.new(128)
         let kind = this.kind
         if kind == QUERY_SELECT {
@@ -300,56 +400,73 @@ value QUERY_DELETE (3)
                 out.write(" FROM ")
                 out.write(this.table)
             }
-            each this.joins as clause {
-                out.write_byte(' ')
-                out.write(clause)
+            let joins = this.joins
+            if isset(joins) {
+                each joins as join {
+                    out.write_byte(' ')
+                    out.write(join.start)
+                    if join.table.length > 0 {
+                        out.write(join.table)
+                        out.write(" ON ")
+                    }
+                    write_marked(out, args, join.condition, join.values, dialect)
+                }
             }
         } else if kind == QUERY_INSERT {
             out.write("INSERT INTO ")
             out.write(this.table)
             out.write(" (")
-            each this.insert_columns as column, index {
+            let columns = this.insert_columns ?? Array[String]{}
+            each columns as column, index {
                 if index > 0 : out.write(", ")
                 out.write(column)
             }
             out.write(") VALUES ")
-            let row: uint = 0
-            while row < this.insert_rows {
-                if row > 0 : out.write(", ")
-                out.write_byte('(')
-                out.write(placeholders(this.insert_columns.length))
-                out.write_byte(')')
-                row++
+            let values = this.insert_values ?? Array[Value]{}
+            each values as value, index {
+                let at = columns.length > 0 ? index % columns.length : 0
+                if at == 0 {
+                    if index > 0 : out.write("), ")
+                    out.write_byte('(')
+                } else {
+                    out.write(", ")
+                }
+                write_placeholder(out, args, value, dialect)
             }
+            if values.length > 0 : out.write_byte(')')
             if this.conflict_kind != CONFLICT_NONE : this.write_conflict(out, dialect)
         } else if kind == QUERY_UPDATE {
             out.write("UPDATE ")
             out.write(this.table)
             out.write(" SET ")
-            each this.assignments as assignment, index {
-                if index > 0 : out.write(", ")
-                out.write(assignment)
+            let assignments = this.assignments
+            if isset(assignments) {
+                each assignments as assignment, index {
+                    if index > 0 : out.write(", ")
+                    out.write(assignment.column)
+                    out.write(" = ")
+                    if assignment.expression.length > 0 : write_marked(out, args, assignment.expression, assignment.values, dialect)
+                    else : write_placeholder(out, args, assignment.value, dialect)
+                }
             }
         } else {
             out.write("DELETE FROM ")
             out.write(this.table)
         }
 
-        args.append_many(this.insert_args)
-        args.append_many(this.set_args)
-        args.append_many(this.join_args)
-
-        if this.conditions.length > 0 {
+        let conditions = this.conditions
+        if isset(conditions) && conditions.length > 0 {
             out.write(" WHERE ")
-            this.conditions.render(out, args)
+            conditions.render(out, args, dialect)
         }
         if this.groups.length > 0 {
             out.write(" GROUP BY ")
             out.write(this.groups)
         }
-        if this.havings.length > 0 {
+        let havings = this.havings
+        if isset(havings) && havings.length > 0 {
             out.write(" HAVING ")
-            this.havings.render(out, args)
+            havings.render(out, args, dialect)
         }
         if this.orders.length > 0 {
             out.write(" ORDER BY ")
@@ -370,23 +487,40 @@ value QUERY_DELETE (3)
             out.write(" RETURNING ")
             out.write(this.returns)
         }
-        return (rewrite(out.to_string(), dialect), args)
+        return (out.to_string(), args)
+    }
+
+    fn note(problem: String) {
+        if this.problem.length == 0 : this.problem = problem
+    }
+
+    // Throws the first mistake made while the query was built
+    fn check() !Error {
+        let problem = this.problem
+        let conditions = this.conditions
+        if problem.length == 0 && isset(conditions) : problem = conditions.problem
+        let havings = this.havings
+        if problem.length == 0 && isset(havings) : problem = havings.problem
+        if problem.length > 0 : throw .syntax { message: problem }
     }
 
     /// Runs the statement and returns how many rows it changed.
     + fn run() uint !Error {
+        this.check() !>
         let db = this.database() !>
         let statement, args = this.build(db.dialect)
         return db.driver.exec(statement, args) !>
     }
     /// Runs the statement and returns every row.
     + fn all() Array[Map[Value]] !Error {
+        this.check() !>
         let db = this.database() !>
         let statement, args = this.build(db.dialect)
         return rows_of(db.driver.query(statement, args) !>) !>
     }
     /// Runs the statement and returns its first row, or null.
     + fn one() ?Map[Value] !Error {
+        this.check() !>
         let db = this.database() !>
         this.limit(1)
         let statement, args = this.build(db.dialect)
@@ -410,6 +544,7 @@ value QUERY_DELETE (3)
     /// This is the count that belongs next to a page of rows: the table, the joins and the
     /// conditions are the ones of this query.
     + fn count(expression: String ("*")) uint !Error {
+        this.check() !>
         let db = this.database() !>
         let columns = this.columns
         let limit = this.row_limit
@@ -436,12 +571,14 @@ value QUERY_DELETE (3)
 
     // `ON CONFLICT` for SQLite and Postgres, `ON DUPLICATE KEY` for MySQL
     fn write_conflict(out: ByteBuffer, dialect: Dialect) {
-        let updates = this.conflict_updates.length > 0 ? this.conflict_updates : this.insert_columns
+        let columns = this.insert_columns ?? Array[String]{}
+        let chosen = this.conflict_updates
+        let updates = isset(chosen) && chosen.length > 0 ? chosen : columns
 
         if dialect == Dialect.mysql {
             if this.conflict_kind == CONFLICT_NOTHING {
                 // MySQL has no "do nothing"; writing a column to itself is how it is done
-                let column = this.insert_columns.get(0) !? ""
+                let column = columns.get(0) !? ""
                 out.write(" ON DUPLICATE KEY UPDATE ")
                 out.write(column)
                 out.write(" = ")
@@ -460,9 +597,10 @@ value QUERY_DELETE (3)
         }
 
         out.write(" ON CONFLICT")
-        if this.conflict_columns.length > 0 {
+        let conflict_columns = this.conflict_columns
+        if isset(conflict_columns) && conflict_columns.length > 0 {
             out.write(" (")
-            each this.conflict_columns as column, index {
+            each conflict_columns as column, index {
                 if index > 0 : out.write(", ")
                 out.write(column)
             }
@@ -498,16 +636,4 @@ fn rows_of(rows: Rows) Array[Map[Value]] !Error {
     }
     rows.close()
     return out
-}
-
-/// Returns `?, ?, ?` for `count` values, to write an `IN (...)` list by hand.
-+ fn placeholders(count: uint) String {
-    if count == 0 : return ""
-    let out = ByteBuffer.new(count * 3)
-    let i: uint = 0
-    while i++ < count {
-        if i > 1 : out.write(", ")
-        out.write_byte('?')
-    }
-    return out.to_string()
 }
