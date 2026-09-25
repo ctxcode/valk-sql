@@ -164,15 +164,15 @@ extend json.Value {
     }
 }
 extend Array[T] {
+    // Declared only for items that convert: every array of a program gets this extension, and a
+    // lint build checks them all
+    #if T.$can_convert_to(Value) || T.$has_method(to_sql_value) || T.$is_type_of(Value)
     + fn to_sql_value() Value $auto {
-        #if T.$can_convert_to(Value) || T.$has_method(to_sql_value) || T.$is_type_of(Value)
         let items = Array[Value].new(this.length)
         each this as item : items.append(convert(item))
         return Value { type: TYPE.list, items: items }
-        #else
-        #error "Only arrays of values that convert to a sql Value can be a list"
-        #end
     }
+    #end
 }
 
 // The default of an optional argument, told apart from an explicit null
