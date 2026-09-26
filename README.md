@@ -5,9 +5,7 @@ One API over the SQL databases [Valk](https://valk-lang.dev) speaks: SQLite, MyS
 Postgres. It holds what every program writes again otherwise — a connection pool, migrations, a
 query builder, rows read into your own classes — and the driver packages plug into it.
 
-Requires Valk 0.7.3 or newer, whose method chains the builder is written for. This package has
-no dependencies of its own: it talks to a driver
-through an interface, and the driver packages implement it.
+Requires Valk 0.7.3 or newer. Install it together with the driver for your database.
 
 ## Install
 
@@ -53,8 +51,7 @@ smooths over; SQL that is special to one database still is.
 
 ## Values
 
-A row is a `Map[sql.Value]`, and `sql.Value` is a struct, so a row costs one allocation rather
-than one per column.
+A row is a `Map[sql.Value]`:
 
 ```rust
 value.is_null()
@@ -273,8 +270,7 @@ let users = sql.rows_to[User](db.all("SELECT id, name, nickname FROM users") ! p
 Fields are matched by name; a nullable field takes a NULL column and a field with a default may
 be missing. SQLite and MySQL have no boolean type and store 1 and 0, which no longer look like
 a bool, so name those columns: `sql.rows_to[User](rows, .{ "active" })`. Postgres booleans need
-no help. This goes through the JSON decoder, so it is for readable code rather than the hottest
-loop.
+no help. Reading the values yourself is faster, for the hottest loops.
 
 ## Transactions
 
@@ -360,36 +356,7 @@ the exact reason matters.
 ## Writing a driver
 
 A driver implements two interfaces, `sql.Driver` and `sql.Rows`, and hands out a `sql.Db`
-wrapping itself. `example/main.valk` has a working one in about forty lines. The driver packages
-of this account do it for you.
-
-## What it costs
-
-Measured against SQLite in memory, 50 000 rows, best of three (`bench/` in valk-sqlite):
-
-| | driver | through sql |
-| --- | --- | --- |
-| 50 000 inserts in one transaction | 13 ms | 15 ms |
-| reading 50 000 rows of 3 columns | 4 ms | 5 ms |
-| 50 000 single-row selects | 16 ms | 21 ms |
-
-Both sides take their values by name. A `Db` remembers the statements it has run (256 of them),
-so a statement it saw before skips reading its names again; what is left is about a tenth of a
-microsecond per statement for the map of values. Reading fills the row straight from the
-statement rather than building the driver's own row first. Against a database on a socket, all
-of this disappears into the round trip.
-
-The driver's own API is untouched and stays available for the paths where every allocation
-counts: `sqlite.Connection` and the others work exactly as before.
-
-## Upgrading from 0.2
-
-- Statements take their values by name: `db.exec("... WHERE id = :id", .{ "id" => 7 })` where it
-  was `db.exec("... WHERE id = ?", .{ 7 })`. `?` is no longer a placeholder.
-- `where("age > ?", .{ 18 })` is `where("age", ">", 18)`, and `where("id = ?", .{ 7 })` is
-  `where("id", 7)`. A condition that needs SQL goes into `where_raw` with values by name; the same
-  holds for `having`, `set_expression` and the joins.
-- `sql.rewrite` and `sql.placeholders` are gone: a list is an array bound to one name.
+wrapping itself. `example/main.valk` has a working one in about forty lines.
 
 ## Development
 
