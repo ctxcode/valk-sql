@@ -1,0 +1,61 @@
+use sql
+
+test "Prepared statements" {
+    let driver = fake()
+    driver.dialect_kind = sql.Dialect.postgres
+    let db = fake_db(driver)
+
+    let insert = db.prepare("INSERT INTO t (a, b, c) VALUES (:a, :b, :a) -- ':x'") ! { assert(false) return }
+    assert(insert.sql.starts_with("INSERT"))
+    let i = 0
+    while i++ < 3 {
+        assert((insert.exec(.{ "a" => i, "b" => "text " + i }) ! { assert(false) return }) == 1)
+    }
+    assert(driver.statements.length == 3)
+    assert((driver.statements.get(2) !? "") == "INSERT INTO t (a, b, c) VALUES ($1, $2, $3) -- ':x'")
+    let args = driver.statement_args.get(2) !? .{}
+    assert(args.length == 3)
+    assert((args.get(0) !? sql.Value.null()).to_int() == 3)
+    assert((args.get(1) !? sql.Value.null()).to_string() == "text 3")
+    assert((args.get(2) !? sql.Value.null()).to_int() == 3)
+
+    // NULL is a value like any other
+    insert.exec(.{ "a" => sql.Value.null(), "b" => sql.Value.null() }) ! { assert(false) return }
+
+    // Reads
+    driver.answer = .{ row(.{ "n" => sql.Value.of_int(5) }) }
+    let find = db.prepare("SELECT n FROM t WHERE a = :a") ! { assert(false) return }
+    assert((find.all(.{ "a" => 1 }) ! { assert(false) return }).length == 1)
+    assert(isset(find.one(.{ "a" => 1 }) ! { assert(false) return }))
+    assert((find.value(.{ "a" => 1 }) ! { assert(false) return }).to_int() == 5)
+    let rows = find.query(.{ "a" => 1 }) ! { assert(false) return }
+    let r: Map[sql.Value] = .{}
+    assert(rows.next(r) ! { assert(false) return })
+    rows.close()
+
+    // A statement without values
+    let plain = db.prepare("SELECT 1") ! { assert(false) return }
+    plain.all() ! { assert(false) return }
+    assert((driver.statements.get(driver.statements.length - 1) !? "") == "SELECT 1")
+
+    // A missing value or a list throws syntax
+    let missing = false
+    insert.exec(.{ "a" => 1 }) ! {
+        missing = error_is(E.code, syntax)
+    }
+    assert(missing)
+    let listed = false
+    find.all(.{ "a" => Array[int]{ 1, 2 } }) ! {
+        listed = error_is(E.code, syntax)
+    }
+    assert(listed)
+
+    // SQLite and MySQL take `?`
+    let lite = fake()
+    let lite_db = fake_db(lite)
+    let tx = lite_db.begin_transaction() ! { assert(false) return }
+    let update = tx.prepare("UPDATE t SET b = :b WHERE a = :a") ! { assert(false) return }
+    update.exec(.{ "a" => 1, "b" => 2 }) ! { assert(false) return }
+    tx.commit() ! { assert(false) return }
+    assert((lite.statements.get(0) !? "") == "UPDATE t SET b = ? WHERE a = ?")
+}

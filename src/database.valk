@@ -64,7 +64,7 @@
 
     // The text for the driver and the values in order. A statement seen before skips the scan,
     // unless a value is a list, whose length decides the text.
-    - fn prepare(statement: String, values: ?Map[Value]) (String, Array[Value]) !Error {
+    - fn resolve(statement: String, values: ?Map[Value]) (String, Array[Value]) !Error {
         if !statement.contains_byte(':') : return (statement, no_values)
         let named_values = values ?? no_named_values
         let known = this.statements
@@ -112,37 +112,26 @@
     ///
     /// `values` fill the `:name` placeholders; see `named` for the rules.
     + fn exec(statement: String, values: ?Map[Value] (null)) uint !Error {
-        let text, args = this.prepare(statement, values) !>
+        let text, args = this.resolve(statement, values) !>
         return this.driver.exec(text, args) !>
     }
 
     /// Runs a statement and returns its rows, to be read one at a time with `Rows.next`.
     + fn query(statement: String, values: ?Map[Value] (null)) Rows !Error {
-        let text, args = this.prepare(statement, values) !>
+        let text, args = this.resolve(statement, values) !>
         return this.driver.query(text, args) !>
     }
 
     /// Runs a statement and returns every row it answered with.
     + fn all(statement: String, values: ?Map[Value] (null)) Array[Map[Value]] !Error {
         let rows = this.query(statement, values) !>
-        let out: Array[Map[Value]] = .{}
-        while true {
-            let row: Map[Value] = .{}
-            if !(rows.next(row) ! { rows.close() throw E }) : break
-            out.append(row)
-        }
-        rows.close()
-        return out
+        return read_all(rows) !>
     }
 
     /// Runs a statement and returns its first row, or null when it answered with none.
     + fn one(statement: String, values: ?Map[Value] (null)) ?Map[Value] !Error {
         let rows = this.query(statement, values) !>
-        let row: Map[Value] = .{}
-        let found = rows.next(row) ! { rows.close() throw E }
-        rows.close()
-        if !found : return null
-        return row
+        return read_one(rows) !>
     }
 
     /// Runs a statement that answers with one value, and returns it. NULL when there is no row.
@@ -151,10 +140,18 @@
     /// let total = (db.value("SELECT count(*) FROM users") ! panic("%{E.message}")).to_int()
     /// ```
     + fn value(statement: String, values: ?Map[Value] (null)) Value !Error {
-        let row = this.one(statement, values) !>
-        if !isset(row) : return Value.null()
-        each row as value : return value
-        return Value.null()
+        return first_value(this.one(statement, values) !>)
+    }
+
+    /// Reads the `:name` placeholders of a statement once, to run it many times with other
+    /// values. A list cannot be bound to a prepared statement.
+    ///
+    /// ```valk
+    /// let find = db.prepare("SELECT * FROM users WHERE id = :id") ! panic("%{E.message}")
+    /// let user = find.one(.{ "id" => 7 }) ! panic("%{E.message}")
+    /// ```
+    + fn prepare(statement: String) Statement !Error {
+        return prepare_statement(this, statement) !>
     }
 
     /// The id the last insert wrote. SQLite and MySQL fill this in; Postgres has no such

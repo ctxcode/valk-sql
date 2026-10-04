@@ -108,6 +108,8 @@ Namespaces: [main](#main)
     + fn one(statement: String, values: ?Map[Value] (null)) ?Map[Value] !Error
     // Returns whether the connection still answers.
     + fn ping() bool
+    // Reads the `:name` placeholders of a statement once, to run it many times with other values. A list cannot be bound to a prepared statement.
+    + fn prepare(statement: String) Statement !Error
     // Runs a statement and returns its rows, to be read one at a time with `Rows.next`.
     + fn query(statement: String, values: ?Map[Value] (null)) Rows !Error
     // Rolls the open transaction back.
@@ -318,6 +320,27 @@ Namespaces: [main](#main)
 ```
 
 ```js
+// A statement whose placeholders were read once, made by `Db.prepare`, to run many times with other values.
++ class Statement {
+    // The database the statement runs on.
+    + db: Db
+    // The statement as it was given, with its `:name` placeholders.
+    ~+ sql: String
+
+    // Runs the statement and returns every row it answered with.
+    + fn all(values: ?Map[Value] (null)) Array[Map[Value]] !Error
+    // Runs the statement and returns how many rows it changed.
+    + fn exec(values: ?Map[Value] (null)) uint !Error
+    // Runs the statement and returns its first row, or null when it answered with none.
+    + fn one(values: ?Map[Value] (null)) ?Map[Value] !Error
+    // Runs the statement and returns its rows, to be read one at a time with `Rows.next`.
+    + fn query(values: ?Map[Value] (null)) Rows !Error
+    // Runs the statement and returns the first value of its first row, NULL when there is none.
+    + fn value(values: ?Map[Value] (null)) Value !Error
+}
+```
+
+```js
 // A transaction that is not held by a closure.
 + class Tx {
     // The database this transaction runs on. Statements may go through it as well.
@@ -341,6 +364,8 @@ Namespaces: [main](#main)
     + fn last_insert_id() int
     // Runs a statement and returns its first row, or null.
     + fn one(statement: String, values: ?Map[Value] (null)) ?Map[Value] !Error
+    // Reads the placeholders of a statement once, to run it many times; see `Db.prepare`.
+    + fn prepare(statement: String) Statement !Error
     // Runs a statement and returns its rows, to be read one at a time.
     + fn query(statement: String, values: ?Map[Value] (null)) Rows !Error
     // Rolls the work back. The transaction is closed afterwards.

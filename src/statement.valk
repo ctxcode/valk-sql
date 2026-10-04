@@ -1,0 +1,101 @@
+/// A statement whose placeholders were read once, made by `Db.prepare`, to run many times with
+/// other values.
+///
+/// Running it skips the scan for `:name` placeholders and hands the driver the same text every
+/// time, which the SQLite and Postgres drivers keep prepared on their connection.
+///
+/// ```valk
+/// let insert = db.prepare("INSERT INTO users (name, age) VALUES (:name, :age)") ! panic("%{E.message}")
+/// each people as person {
+///     insert.exec(.{ "name" => person.name, "age" => person.age }) ! panic("%{E.message}")
+/// }
+/// ```
++ class Statement {
+    /// The database the statement runs on.
+    + db: Db
+    /// The statement as it was given, with its `:name` placeholders.
+    ~+ sql: String
+    // The text for the driver, and per placeholder the name its value comes from
+    text: String
+    names: Array[String]
+
+    /// Runs the statement and returns how many rows it changed.
+    + fn exec(values: ?Map[Value] (null)) uint !Error {
+        return this.db.driver.exec(this.text, this.args(values) !>) !>
+    }
+
+    /// Runs the statement and returns its rows, to be read one at a time with `Rows.next`.
+    + fn query(values: ?Map[Value] (null)) Rows !Error {
+        return this.db.driver.query(this.text, this.args(values) !>) !>
+    }
+
+    /// Runs the statement and returns every row it answered with.
+    + fn all(values: ?Map[Value] (null)) Array[Map[Value]] !Error {
+        let rows = this.query(values) !>
+        return read_all(rows) !>
+    }
+
+    /// Runs the statement and returns its first row, or null when it answered with none.
+    + fn one(values: ?Map[Value] (null)) ?Map[Value] !Error {
+        let rows = this.query(values) !>
+        return read_one(rows) !>
+    }
+
+    /// Runs the statement and returns the first value of its first row, NULL when there is none.
+    + fn value(values: ?Map[Value] (null)) Value !Error {
+        return first_value(this.one(values) !>)
+    }
+
+    // The values in the order of the placeholders
+    fn args(values: ?Map[Value]) Array[Value] !Error {
+        let names = this.names
+        if names.length == 0 : return no_values
+        let given = values ?? no_named_values
+        let args = Array[Value].new(names.length)
+        each names as name {
+            let value = given.get(name) ! throw .syntax { message: "No value for the placeholder ':" + name + "'", sql: this.sql }
+            if value.type == TYPE.list : throw .syntax { message: "A list cannot be bound to ':" + name + "' of a prepared statement", sql: this.sql }
+            args.append(value)
+        }
+        return args
+    }
+}
+
+// Reads the placeholders of `statement` once, for `Db.prepare`
+fn prepare_statement(db: Db, statement: String) Statement !Error {
+    let names = named_order(statement)
+    if names.length == 0 {
+        return Statement { db: db, sql: statement, text: statement, names: names }
+    }
+    // Any single value writes the same placeholders
+    let placeholders = Map[Value]{}
+    each names as name : placeholders.set(name, Value.null())
+    let args = Array[Value]{}
+    let text = bind_named(statement, placeholders, args, db.dialect) !>
+    return Statement { db: db, sql: statement, text: text, names: names }
+}
+
+fn read_all(rows: Rows) Array[Map[Value]] !Error {
+    let out: Array[Map[Value]] = .{}
+    while true {
+        let row: Map[Value] = .{}
+        if !(rows.next(row) ! { rows.close() throw E }) : break
+        out.append(row)
+    }
+    rows.close()
+    return out
+}
+
+fn read_one(rows: Rows) ?Map[Value] !Error {
+    let row: Map[Value] = .{}
+    let found = rows.next(row) ! { rows.close() throw E }
+    rows.close()
+    if !found : return null
+    return row
+}
+
+fn first_value(row: ?Map[Value]) Value {
+    if !isset(row) : return Value.null()
+    each row as value : return value
+    return Value.null()
+}

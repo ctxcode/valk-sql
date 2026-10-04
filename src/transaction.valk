@@ -42,6 +42,10 @@
     + fn value(statement: String, values: ?Map[Value] (null)) Value !Error {
         return this.db.value(statement, values) !>
     }
+    /// Reads the placeholders of a statement once, to run it many times; see `Db.prepare`.
+    + fn prepare(statement: String) Statement !Error {
+        return this.db.prepare(statement) !>
+    }
     /// The id the last insert wrote, where the database has one.
     + fn last_insert_id() int {
         return this.db.last_insert_id()

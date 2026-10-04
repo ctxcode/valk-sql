@@ -16,11 +16,15 @@ fn main() {
     println("migrations run: " + ran.length)
 
     // Writing, with the values bound
-    db.exec("INSERT INTO users (name, age) VALUES (?, ?)", .{ sql.Value.of("Ada"), sql.Value.of_int(36) }) ! panic("%{E.message}")
+    db.exec("INSERT INTO users (name, age) VALUES (:name, :age)", .{ "name" => "Ada", "age" => 36 }) ! panic("%{E.message}")
     println("wrote row " + db.last_insert_id())
 
+    // A statement that runs many times can be prepared once
+    let insert = db.prepare("INSERT INTO users (name, age) VALUES (:name, :age)") ! panic("%{E.message}")
+    insert.exec(.{ "name" => "Bob", "age" => 20 }) ! panic("%{E.message}")
+
     // Reading
-    let rows = db.all("SELECT * FROM users WHERE age > ?", .{ sql.Value.of_int(18) }) ! panic("%{E.message}")
+    let rows = db.all("SELECT * FROM users WHERE age > :age", .{ "age" => 18 }) ! panic("%{E.message}")
     each rows as row {
         println("user: " + (row.get("name") !? sql.Value.null()).to_string())
     }
@@ -28,7 +32,7 @@ fn main() {
     // The builder writes the statement for whichever database is behind it
     let query = db.select("id, name")
         .from("users")
-        .where("age > ?", .{ sql.Value.of_int(18) })
+        .where("age", ">", 18)
         .order_by("name")
         .limit(10)
     println("sqlite:   " + query.to_sql(sql.Dialect.sqlite))

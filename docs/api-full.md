@@ -283,6 +283,8 @@ w.where_raw("lower(email) = :email OR phone = :phone", .{ "email" => email, "pho
     + fn one(statement: String, values: ?Map[Value] (null)) ?Map[Value] !Error
     // Returns whether the connection still answers.
     + fn ping() bool
+    // Reads the `:name` placeholders of a statement once, to run it many times with other values. A list cannot be bound to a prepared statement.
+    + fn prepare(statement: String) Statement !Error
     // Runs a statement and returns its rows, to be read one at a time with `Rows.next`.
     + fn query(statement: String, values: ?Map[Value] (null)) Rows !Error
     // Rolls the open transaction back.
@@ -396,6 +398,16 @@ Runs a statement and returns its first row, or null when it answered with none.
 #### ping
 
 Returns whether the connection still answers.
+
+#### prepare
+
+Reads the `:name` placeholders of a statement once, to run it many times with other
+values. A list cannot be bound to a prepared statement.
+
+```valk
+let find = db.prepare("SELECT * FROM users WHERE id = :id") ! panic("%{E.message}")
+let user = find.one(.{ "id" => 7 }) ! panic("%{E.message}")
+```
 
 #### query
 
@@ -1103,6 +1115,70 @@ Reads the next row into `row` and returns whether there was one. The map is clea
 first, so one map can serve a whole result.
 
 ```js
+// A statement whose placeholders were read once, made by `Db.prepare`, to run many times with other values.
++ class Statement {
+    // The database the statement runs on.
+    + db: Db
+    // The statement as it was given, with its `:name` placeholders.
+    ~+ sql: String
+
+    // Runs the statement and returns every row it answered with.
+    + fn all(values: ?Map[Value] (null)) Array[Map[Value]] !Error
+    // Runs the statement and returns how many rows it changed.
+    + fn exec(values: ?Map[Value] (null)) uint !Error
+    // Runs the statement and returns its first row, or null when it answered with none.
+    + fn one(values: ?Map[Value] (null)) ?Map[Value] !Error
+    // Runs the statement and returns its rows, to be read one at a time with `Rows.next`.
+    + fn query(values: ?Map[Value] (null)) Rows !Error
+    // Runs the statement and returns the first value of its first row, NULL when there is none.
+    + fn value(values: ?Map[Value] (null)) Value !Error
+}
+```
+
+### Statement
+
+A statement whose placeholders were read once, made by `Db.prepare`, to run many times with
+other values.
+
+Running it skips the scan for `:name` placeholders and hands the driver the same text every
+time, which the SQLite and Postgres drivers keep prepared on their connection.
+
+```valk
+let insert = db.prepare("INSERT INTO users (name, age) VALUES (:name, :age)") ! panic("%{E.message}")
+each people as person {
+    insert.exec(.{ "name" => person.name, "age" => person.age }) ! panic("%{E.message}")
+}
+```
+
+#### db
+
+The database the statement runs on.
+
+#### sql
+
+The statement as it was given, with its `:name` placeholders.
+
+#### all
+
+Runs the statement and returns every row it answered with.
+
+#### exec
+
+Runs the statement and returns how many rows it changed.
+
+#### one
+
+Runs the statement and returns its first row, or null when it answered with none.
+
+#### query
+
+Runs the statement and returns its rows, to be read one at a time with `Rows.next`.
+
+#### value
+
+Runs the statement and returns the first value of its first row, NULL when there is none.
+
+```js
 // A transaction that is not held by a closure.
 + class Tx {
     // The database this transaction runs on. Statements may go through it as well.
@@ -1126,6 +1202,8 @@ first, so one map can serve a whole result.
     + fn last_insert_id() int
     // Runs a statement and returns its first row, or null.
     + fn one(statement: String, values: ?Map[Value] (null)) ?Map[Value] !Error
+    // Reads the placeholders of a statement once, to run it many times; see `Db.prepare`.
+    + fn prepare(statement: String) Statement !Error
     // Runs a statement and returns its rows, to be read one at a time.
     + fn query(statement: String, values: ?Map[Value] (null)) Rows !Error
     // Rolls the work back. The transaction is closed afterwards.
@@ -1199,6 +1277,10 @@ The id the last insert wrote, where the database has one.
 #### one
 
 Runs a statement and returns its first row, or null.
+
+#### prepare
+
+Reads the placeholders of a statement once, to run it many times; see `Db.prepare`.
 
 #### query
 

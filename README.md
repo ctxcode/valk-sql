@@ -86,6 +86,25 @@ such as the Postgres JSON operator, stays what it is. A name without a value thr
 `sql.named(statement, values, dialect)` does the conversion by itself, for code that passes the
 statement on.
 
+## Prepared statements
+
+A statement that runs many times can be prepared once: its placeholders are read once, and the
+driver gets the same text every time, which SQLite and Postgres keep prepared on the connection.
+
+```rust
+let insert = db.prepare("INSERT INTO users (name, age) VALUES (:name, :age)") ! panic("%{E.message}")
+each people as person {
+    insert.exec(.{ "name" => person.name, "age" => person.age }) ! panic("%{E.message}")
+}
+
+let find = db.prepare("SELECT * FROM users WHERE id = :id") ! panic("%{E.message}")
+let user = find.one(.{ "id" => 7 }) ! panic("%{E.message}")
+```
+
+A statement has `exec`, `query`, `all`, `one` and `value`, like the database. Every name needs a
+value, and a list cannot be bound to a prepared statement. The drivers have prepared statements
+of their own as well, which skip more work but are not portable.
+
 ## The query builder
 
 The builder writes the statement and keeps the values apart from it. Every method returns the
