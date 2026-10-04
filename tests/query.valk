@@ -545,6 +545,15 @@ test "Counting a grouped query counts its groups" {
     assert((driver.statements.get(0) !? "") == "SELECT count(*) AS n FROM (SELECT team FROM results WHERE (season = ?) GROUP BY team) AS counted")
 }
 
+test "Counting a DISTINCT query counts the distinct rows" {
+    let driver = fake()
+    let db = fake_db(driver)
+    driver.answer = .{ row(.{ "n" => sql.Value.of_int(4) }) }
+    let n = db.select("DISTINCT city").from("users").count() ! { assert(false) return }
+    assert(n == 4)
+    assert((driver.statements.get(0) !? "") == "SELECT count(*) AS n FROM (SELECT DISTINCT city FROM users) AS counted")
+}
+
 test "Quoting names" {
     assert(sql.quote_identifier("users") == "\"users\"")
     assert(sql.quote_identifier("public.users", sql.Dialect.postgres) == "\"public\".\"users\"")

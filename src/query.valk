@@ -581,8 +581,9 @@ class Assignment {
         let has_limit = this.has_limit
         let offset = this.row_offset
         let orders = this.orders
-        // A grouped query answers a row per group, so its groups are what is counted
-        let grouped = this.groups.length > 0
+        // A grouped or DISTINCT query answers a row per group or distinct value, so those are
+        // what is counted
+        let grouped = this.groups.length > 0 || columns.ltrim(" ").lower().starts_with("distinct ")
         if !grouped : this.columns = "count(" + expression + ") AS n"
         this.has_limit = false
         this.row_offset = 0
