@@ -80,3 +80,41 @@ test "Splitting a migration file" {
     assert(driver.statements.contains("CREATE TABLE t (a TEXT)"))
     assert(driver.statements.contains("INSERT INTO t VALUES ('a;b')"))
 }
+
+test "Migrations run in the order of their names" {
+    let driver = fake()
+    let db = fake_db(driver)
+    let migrator = sql.Migrator.new(db)
+    migrator.add("0002-b", "CREATE TABLE b (x INT)")
+    migrator.add("0001-a", "CREATE TABLE a (x INT)")
+    driver.answer = .{}
+    let pending = migrator.pending() ! { assert(false) return }
+    assert((pending.get(0) !? "") == "0001-a")
+    let ran = migrator.migrate() ! { assert(false) return }
+    assert((ran.get(0) !? "") == "0001-a" && (ran.get(1) !? "") == "0002-b")
+}
+
+test "Splitting bodies, block comments and dollar quotes" {
+    let driver = fake()
+    let db = fake_db(driver)
+    let migrator = sql.Migrator.new(db)
+    driver.answer = .{}
+    migrator.add("one.sql", "
+        /* a comment; with a ; in it */
+        CREATE TABLE t (a TEXT, `b;c` INT);
+        CREATE TRIGGER t_ins AFTER INSERT ON t BEGIN
+            UPDATE t SET a = CASE WHEN a IS NULL THEN 'x' ELSE a END;
+            DELETE FROM t WHERE a = 'y';
+        END;
+        CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql;
+        CREATE PROCEDURE p() BEGIN IF 1 THEN SELECT 1; END IF; CASE 1 WHEN 1 THEN SELECT 2; END CASE; END;
+        SELECT 2
+    ")
+    migrator.migrate() ! { println(E.message) assert(false) return }
+    let s = driver.statements
+    assert(s.contains("/* a comment; with a ; in it */\n        CREATE TABLE t (a TEXT, `b;c` INT)"))
+    assert(s.any(fn(x: String) bool { return x.starts_with("CREATE TRIGGER t_ins") && x.ends_with("DELETE FROM t WHERE a = 'y';\n        END") }))
+    assert(s.contains("CREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql"))
+    assert(s.contains("CREATE PROCEDURE p() BEGIN IF 1 THEN SELECT 1; END IF; CASE 1 WHEN 1 THEN SELECT 2; END CASE; END"))
+    assert(s.contains("SELECT 2"))
+}

@@ -27,7 +27,7 @@ use valk.time
     + db: Db
     /// The table the names of the migrations that ran are kept in.
     + table: String ("schema_migrations")
-    /// The migrations, in the order they run.
+    /// The migrations, in the order they were added; they run sorted by name.
     ~ migrations: Array[Migration] (.{})
 
     /// Creates a migrator for a database.
@@ -72,7 +72,7 @@ use valk.time
     + fn pending() Array[String] !Error {
         let done = this.applied() !>
         let names: Array[String] = .{}
-        each this.migrations as migration {
+        each this.in_order() as migration {
             if done.contains(migration.name) : continue
             names.append(migration.name)
         }
@@ -85,12 +85,19 @@ use valk.time
     + fn migrate() Array[String] !Error {
         let done = this.applied() !>
         let ran: Array[String] = .{}
-        each this.migrations as migration {
+        each this.in_order() as migration {
             if done.contains(migration.name) : continue
             this.run_one(migration) !>
             ran.append(migration.name)
         }
         return ran
+    }
+
+    // The migrations by name, whatever order they were added in
+    fn in_order() Array[Migration] {
+        return this.migrations.sorted(fn(a: Migration, b: Migration) bool {
+            return a.name > b.name
+        })
     }
 
     fn run_one(migration: Migration) !Error {
@@ -130,32 +137,55 @@ fn is_space(ch: u8) bool {
     return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n'
 }
 
-// Splits a file into statements on `;`, keeping text in quotes and comments together
+// Splits a file into statements on `;`, keeping text in quotes and comments together. The body
+// of a `CREATE TRIGGER`, `PROCEDURE` or `FUNCTION` between `BEGIN` and `END` holds `;` of its own.
 fn split_statements(sql: String) Array[String] {
     let out: Array[String] = .{}
     let current = ByteBuffer.new(sql.length)
     let i: uint = 0
     let length = sql.length
+    // Words seen in this statement: whether it is a CREATE, and of something with a body
+    let words: uint = 0
+    let create = false
+    let body = false
+    let depth: uint = 0
+    let after_end = false
     while i < length {
-        let ch = sql[i++]
-        if ch == '\'' || ch == '"' {
-            current.write_byte(ch)
-            while i < length {
-                let quoted = sql[i++]
-                current.write_byte(quoted)
-                if quoted == ch : break
+        let skipped = skip_quoted(sql, i)
+        if skipped > i {
+            // Line comments are left out; everything else is kept as it is
+            if sql[i] != '-' {
+                while i < skipped : current.write_byte(sql[i++])
             }
+            i = skipped
             continue
         }
-        if ch == '-' && i < length && sql[i] == '-' {
-            // Line comment
-            while i < length && sql[i] != '\n' : i++
+        let ch = sql[i]
+        if is_word_byte(ch) {
+            let start = i
+            while i < length && is_word_byte(sql[i]) : i++
+            let word = sql.range(start, i - start)
+            current.write(word)
+            words++
+            if words == 1 : create = word_is(word, "CREATE")
+            else if create && !body && (word_is(word, "TRIGGER") || word_is(word, "PROCEDURE") || word_is(word, "FUNCTION")) : body = true
+            else if body {
+                // `END CASE` closes the CASE it names
+                if word_is(word, "BEGIN") || (word_is(word, "CASE") && !after_end) : depth++
+                else if word_is(word, "END") && depth > 0 && !ends_block_statement(sql, i) : depth--
+            }
+            after_end = word_is(word, "END")
             continue
         }
-        if ch == ';' {
+        i++
+        if ch == ';' : after_end = false
+        if ch == ';' && depth == 0 {
             let statement = trim_space(current.to_string())
             if statement.length > 0 : out.append(statement)
             current.clear()
+            words = 0
+            create = false
+            body = false
             continue
         }
         current.write_byte(ch)
@@ -163,4 +193,19 @@ fn split_statements(sql: String) Array[String] {
     let last = trim_space(current.to_string())
     if last.length > 0 : out.append(last)
     return out
+}
+
+fn word_is(word: String, upper: String) bool {
+    return word.view().equals_ignore_ascii_case(upper)
+}
+
+// Whether the `END` before `at` closes a MySQL `IF`, `LOOP`, `WHILE` or `REPEAT`, which opened
+// no block this counts
+fn ends_block_statement(sql: String, at: uint) bool {
+    let i = at
+    while i < sql.length && is_space(sql[i]) : i++
+    let start = i
+    while i < sql.length && is_word_byte(sql[i]) : i++
+    let word = sql.range(start, i - start)
+    return word_is(word, "IF") || word_is(word, "LOOP") || word_is(word, "WHILE") || word_is(word, "REPEAT")
 }
