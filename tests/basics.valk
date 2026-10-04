@@ -153,3 +153,29 @@ test "Named placeholders" {
     db.all("SELECT * FROM users WHERE id IN (:ids)", .{ "ids" => Array[int]{ 1, 2 } }) ! { assert(false) return }
     assert((driver.statements.get(1) !? "") == "SELECT * FROM users WHERE id IN ($1, $2)")
 }
+
+test "Placeholders inside comments and dollar quotes" {
+    // An apostrophe in a comment starts no text, and names in comments need no value
+    let statement, args = sql.named("SELECT a -- it's :x\n, :y /* :z it's */ FROM t", .{ "y" => 1 }, sql.Dialect.postgres) ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert(statement == "SELECT a -- it's :x\n, $1 /* :z it's */ FROM t")
+    assert(args.length == 1)
+
+    let body, none = sql.named("CREATE FUNCTION f() RETURNS int AS $$ SELECT :a; $$ LANGUAGE sql; SELECT $tag$ :b $tag$, a$b, :c", .{ "c" => 1 }) ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert(body == "CREATE FUNCTION f() RETURNS int AS $$ SELECT :a; $$ LANGUAGE sql; SELECT $tag$ :b $tag$, a$b, ?")
+    assert(none.length == 1)
+
+    // A prepared statement reads its names the same way
+    let driver = fake()
+    let db = fake_db(driver)
+    let prepared = db.prepare("SELECT :id -- don't :skip") ! { assert(false) return }
+    prepared.exec(.{ "id" => 1 }) ! { println(E.message) assert(false) return }
+    assert((driver.statements.get(0) !? "") == "SELECT ? -- don't :skip")
+}
