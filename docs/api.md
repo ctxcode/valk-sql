@@ -30,6 +30,8 @@ Namespaces: [main](#main)
 + fn convert(ndata: $T) Value
 // Turns the `:name` placeholders of `statement` into the placeholders of `dialect` (`?`, or `$1`, `$2`, ... for Postgres) and returns the values in their order.
 + fn named(statement: String, values: ?Map[Value], dialect: Dialect (Dialect.sqlite)) (String, Array[Value]) !Error
+// Quotes a table or column name for `dialect`: `"name"`, or `` `name` `` for MySQL. A quote inside the name is doubled, and a dot splits it, so `public.users` becomes `"public"."users"`. This is how a name that comes from input, or is a reserved word, goes into a statement or the query builder.
++ fn quote_identifier(name: String, dialect: Dialect (Dialect.sqlite)) String
 // Reads a row into a class or struct of your own.
 + fn row_to[T](row: Map[Value], bool_columns: ?Array[String] (null)) T !Error
 // Returns the row as a JSON object, for an answer that goes straight out as JSON.
@@ -162,7 +164,7 @@ Namespaces: [main](#main)
 + class Migrator {
     // The database to migrate.
     + db: Db
-    // The migrations, in the order they run.
+    // The migrations, in the order they were added; they run sorted by name.
     ~ migrations: Array[Migration]
     // The table the names of the migrations that ran are kept in.
     + table: String
@@ -228,7 +230,7 @@ Namespaces: [main](#main)
     + static fn delete_from(table: String) Query
     // The table to read from.
     + fn from(table: String) Query
-    // Adds a `GROUP BY`.
+    // Adds a `GROUP BY`; a second call adds its columns after the first.
     + fn group_by(columns: String) Query
     // Adds a `HAVING` condition with `AND`, as `where` does: `having("count(*)", ">", 5)`.
     + fn having(column: String, operator_or_value: ?Value, value: ?Value (not_given())) Query
@@ -268,7 +270,7 @@ Namespaces: [main](#main)
     + fn or_where_group(build: fn(Conditions)()) Query
     // The same, joined with `OR`.
     + fn or_where_raw(condition: String, values: ?Map[Value] (null)) Query
-    // Adds an `ORDER BY`, written as it is: `order_by("name ASC, id DESC")`.
+    // Adds an `ORDER BY`, written as it is: `order_by("name ASC, id DESC")`. A second call orders by its columns after the first.
     + fn order_by(columns: String) Query
     // Takes one page of rows: page 1 is the first `per_page` rows, page 2 the next, and so on.
     + fn page(number: uint, per_page: uint) Query

@@ -450,3 +450,88 @@ test "A mistake in a condition is thrown when the query runs" {
     // Nothing reached the database
     assert(driver.statements.length == 0)
 }
+
+test "A commit that fails rolls back" {
+    let driver = fake()
+    let db = fake_db(driver)
+    let tx = db.begin_transaction() ! { assert(false) return }
+    driver.fail_commit = true
+    tx.commit() ! {
+        assert(error_is(E.code, busy))
+        assert(!tx.open)
+        assert(driver.transactions.contains("rollback"))
+        return
+    }
+    assert(false)
+}
+
+test "Builder statements are valid for every database" {
+    // SQLite and MySQL take no OFFSET without a LIMIT
+    let skip = sql.Query.select().from("t").offset(5)
+    assert(skip.to_sql(sql.Dialect.sqlite) == "SELECT * FROM t LIMIT -1 OFFSET 5")
+    assert(skip.to_sql(sql.Dialect.postgres) == "SELECT * FROM t OFFSET 5")
+    assert(skip.to_sql(sql.Dialect.mysql) == "SELECT * FROM t LIMIT 18446744073709551615 OFFSET 5")
+
+    // A second order or group adds to the first
+    assert(sql.Query.select().from("t").order_by("a").order_by("b DESC").to_sql() == "SELECT * FROM t ORDER BY a, b DESC")
+    assert(sql.Query.select("a, b").from("t").group_by("a").group_by("b").to_sql() == "SELECT a, b FROM t GROUP BY a, b")
+
+    // Placeholders number on through joins, conditions, groups and havings
+    let query = sql.Query.select("t.*").from("t")
+        .join_on("u", "u.id = t.uid AND u.k = :k", .{ "k" => 1 })
+        .where("a", 2)
+        .where_raw("b = :b OR c = :b", .{ "b" => 3 })
+        .where_group(fn(w: sql.Conditions) {
+            w.where("d", 4)
+            w.or_where("e", Array[int]{ 5, 6 })
+        })
+        .having("count(*)", ">", 7)
+        .order_by("a").limit(8).offset(9)
+    assert(query.to_sql(sql.Dialect.postgres) == "SELECT t.* FROM t JOIN u ON u.id = t.uid AND u.k = $1 WHERE (a = $2) AND (b = $3 OR c = $4) AND ((d = $5) OR (e IN ($6, $7))) HAVING (count(*) > $8) ORDER BY a LIMIT 8 OFFSET 9")
+    let args = query.args()
+    let expected = Array[int]{ 1, 2, 3, 3, 4, 5, 6, 7 }
+    assert(args.length == expected.length)
+    each args as arg, i : assert(arg.to_int() == (expected.get(i) !? 0))
+
+    // An operator that is not on the list never reaches the statement
+    let driver = fake()
+    let db = fake_db(driver)
+    db.select().from("t").where("a", "= 1 OR 1 =", 1).all() ! {
+        assert(error_is(E.code, syntax))
+        assert(driver.statements.length == 0)
+        return
+    }
+    assert(false)
+}
+
+test "Every row of an insert has the same columns" {
+    let driver = fake()
+    let db = fake_db(driver)
+    let insert = db.insert_into("t")
+    insert.values(.{ "a" => 1, "b" => 2 })
+    insert.values(.{ "a" => 3, "c" => 4 })
+    insert.run() ! {
+        assert(error_is(E.code, syntax))
+        assert(driver.statements.length == 0)
+        return
+    }
+    assert(false)
+}
+
+test "Counting a grouped query counts its groups" {
+    let driver = fake()
+    let db = fake_db(driver)
+    driver.answer = .{ row(.{ "n" => sql.Value.of_int(3) }) }
+    let n = db.select("team").from("results").where("season", 2026).group_by("team").order_by("team").limit(2).count() ! { assert(false) return }
+    assert(n == 3)
+    assert((driver.statements.get(0) !? "") == "SELECT count(*) AS n FROM (SELECT team FROM results WHERE (season = ?) GROUP BY team) AS counted")
+}
+
+test "Quoting names" {
+    assert(sql.quote_identifier("users") == "\"users\"")
+    assert(sql.quote_identifier("public.users", sql.Dialect.postgres) == "\"public\".\"users\"")
+    assert(sql.quote_identifier("we\"ird", sql.Dialect.postgres) == "\"we\"\"ird\"")
+    assert(sql.quote_identifier("order", sql.Dialect.mysql) == "`order`")
+    assert(sql.quote_identifier("a`b c", sql.Dialect.mysql) == "`a``b c`")
+    assert(sql.quote_identifier("x\" OR 1=1 --") == "\"x\"\" OR 1=1 --\"")
+}

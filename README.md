@@ -136,7 +136,8 @@ query.where_raw("lower(email) = :email", .{ "email" => email })
 ```
 
 The column is written as it is given, so `users.id` works; it must come from your program, never
-from the input it handles. What `where` cannot say goes into `where_raw`, with values by name.
+from the input it handles. A name that does come from input, or is a reserved word, goes through
+`sql.quote_identifier(name, db.dialect)`, which quotes it for the database. What `where` cannot say goes into `where_raw`, with values by name.
 A mistake, such as an operator it does not know, is thrown as `syntax` when the query runs.
 
 ## Mixing AND and OR
@@ -334,7 +335,8 @@ each done as name : println("ran " + name)
 `#embed_dir` puts the files inside the program, so no directory has to exist where it runs. They
 run in the order of their names (`0001-users.sql`, `0002-posts.sql`, ...), each in a
 transaction, and the names that ran are kept in a `schema_migrations` table so a second run does
-nothing. `pending()` says what a run would do.
+nothing. `pending()` says what a run would do. A file is split into statements on `;`, except
+inside text, comments, `$$` bodies and the `BEGIN ... END` of a trigger or procedure.
 
 ## Pools
 

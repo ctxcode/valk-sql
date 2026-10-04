@@ -239,16 +239,20 @@ class Assignment {
             this.insert_values = created
             return created
         }
+        // A column the first row lacks would be dropped without a word
+        let same = row.length == columns.length
         each columns as column {
+            if !row.has(column) : same = false
             values.append(row.get(column) !? Value.null())
         }
+        if !same : this.note("Every row of an insert must have the columns of the first: " + columns.join(", "))
         this.insert_rows++
         return this
     }
 
-    /// Adds a `GROUP BY`.
+    /// Adds a `GROUP BY`; a second call adds its columns after the first.
     + fn group_by(columns: String) SELF {
-        this.groups = columns
+        this.groups = this.groups.length > 0 ? this.groups + ", " + columns : columns
         return this
     }
     /// Adds a `HAVING` condition with `AND`, as `where` does: `having("count(*)", ">", 5)`.
@@ -276,9 +280,10 @@ class Assignment {
         this.having_conditions().group(build)
         return this
     }
-    /// Adds an `ORDER BY`, written as it is: `order_by("name ASC, id DESC")`.
+    /// Adds an `ORDER BY`, written as it is: `order_by("name ASC, id DESC")`. A second call
+    /// orders by its columns after the first.
     + fn order_by(columns: String) SELF {
-        this.orders = columns
+        this.orders = this.orders.length > 0 ? this.orders + ", " + columns : columns
         return this
     }
     /// Adds a `LIMIT`.
@@ -477,9 +482,10 @@ class Assignment {
             out.write_uint_ascii(this.row_limit)
         }
         if this.row_offset > 0 {
-            // Every one of these databases takes OFFSET after LIMIT, and MySQL needs a LIMIT
-            // in front of it
+            // Every one of these databases takes OFFSET after LIMIT, and SQLite and MySQL need a
+            // LIMIT in front of it
             if this.row_limit == 0 && dialect == Dialect.mysql : out.write(" LIMIT 18446744073709551615")
+            if this.row_limit == 0 && dialect == Dialect.sqlite : out.write(" LIMIT -1")
             out.write(" OFFSET ")
             out.write_uint_ascii(this.row_offset)
         }
@@ -542,7 +548,7 @@ class Assignment {
     /// Runs the same query as a count, without its order, limit and offset.
     ///
     /// This is the count that belongs next to a page of rows: the table, the joins and the
-    /// conditions are the ones of this query.
+    /// conditions are the ones of this query. A query with a `group_by` counts its groups.
     + fn count(expression: String ("*")) uint !Error {
         this.check() !>
         let db = this.database() !>
@@ -550,11 +556,14 @@ class Assignment {
         let limit = this.row_limit
         let offset = this.row_offset
         let orders = this.orders
-        this.columns = "count(" + expression + ") AS n"
+        // A grouped query answers a row per group, so its groups are what is counted
+        let grouped = this.groups.length > 0
+        if !grouped : this.columns = "count(" + expression + ") AS n"
         this.row_limit = 0
         this.row_offset = 0
         this.orders = ""
         let statement, args = this.build(db.dialect)
+        if grouped : statement = "SELECT count(" + expression + ") AS n FROM (" + statement + ") AS counted"
         this.columns = columns
         this.row_limit = limit
         this.row_offset = offset

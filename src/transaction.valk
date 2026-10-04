@@ -72,7 +72,11 @@
     + fn commit() !Error {
         if !this.open : throw .error { message: "This transaction was already finished" }
         this.open = false
-        this.db.commit() !>
+        // A commit that fails, such as on a busy SQLite database, can leave the transaction open
+        this.db.commit() ! {
+            this.db.rollback() _
+            throw E
+        }
     }
 
     /// Rolls the work back. The transaction is closed afterwards.

@@ -102,7 +102,7 @@ extend Query {
         let after = Value.null()
         // The conditions of the caller are kept; the walk adds one of its own per page
         let conditions = this.conditions
-        this.order_by(column)
+        this.orders = column
         this.limit(size)
         this.offset(0)
 

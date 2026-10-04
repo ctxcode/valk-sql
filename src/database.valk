@@ -5,6 +5,31 @@
     postgres
 }
 
+/// Quotes a table or column name for `dialect`: `"name"`, or `` `name` `` for MySQL. A quote
+/// inside the name is doubled, and a dot splits it, so `public.users` becomes
+/// `"public"."users"`. This is how a name that comes from input, or is a reserved word, goes into
+/// a statement or the query builder.
+///
+/// ```valk
+/// db.select().from("users").order_by(sql.quote_identifier(sort_column, db.dialect) + " DESC")
+/// ```
++ fn quote_identifier(name: String, dialect: Dialect (Dialect.sqlite)) String {
+    let quote: u8 = dialect == Dialect.mysql ? '`' : '"'
+    let out = ByteBuffer.new(name.length + 2)
+    out.write_byte(quote)
+    each name as ch {
+        if ch == '.' {
+            out.write_byte(quote)
+            out.write_byte('.')
+        } else if ch == quote {
+            out.write_byte(quote)
+        }
+        out.write_byte(ch == '.' ? quote : ch)
+    }
+    out.write_byte(quote)
+    return out.to_string()
+}
+
 /// What a driver has to provide. The driver packages implement this; a program uses `Db`.
 + interface Driver {
     /// Which database this is.

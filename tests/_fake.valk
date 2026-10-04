@@ -16,6 +16,7 @@ class FakeDriver is sql.Driver {
     /// Only fail a statement that contains this text; empty fails the next statement
     + fail_when: String ("")
     + closed: bool (false)
+    + fail_commit: bool (false)
     + transactions: Array[String] (.{})
 
     + get dialect: sql.Dialect {
@@ -51,6 +52,7 @@ class FakeDriver is sql.Driver {
         this.transactions.append(immediate ? "begin immediate" : "begin")
     }
     + fn commit() !sql.Error {
+        if this.fail_commit : throw .busy { message: "database is locked" }
         this.transactions.append("commit")
     }
     + fn rollback() !sql.Error {
