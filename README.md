@@ -137,7 +137,8 @@ query.where_raw("lower(email) = :email", .{ "email" => email })
 
 The column is written as it is given, so `users.id` works; it must come from your program, never
 from the input it handles. A name that does come from input, or is a reserved word, goes through
-`sql.quote_identifier(name, db.dialect)`, which quotes it for the database. What `where` cannot say goes into `where_raw`, with values by name.
+`sql.quote_identifier(name, db.dialect)`, which quotes it for the database. The columns of `values`, `set` and
+the upserts must be names, plain or quoted; anything else is thrown as `syntax`. What `where` cannot say goes into `where_raw`, with values by name.
 A mistake, such as an operator it does not know, is thrown as `syntax` when the query runs.
 
 ## Mixing AND and OR

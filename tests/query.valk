@@ -553,3 +553,33 @@ test "Quoting names" {
     assert(sql.quote_identifier("a`b c", sql.Dialect.mysql) == "`a``b c`")
     assert(sql.quote_identifier("x\" OR 1=1 --") == "\"x\"\" OR 1=1 --\"")
 }
+
+test "Insert and update columns must be names" {
+    let driver = fake()
+    let db = fake_db(driver)
+
+    // Plain, qualified and quoted names go through
+    db.insert_into("t").values(.{ "a_1" => 1, sql.quote_identifier("we\"ird name") => 2 }).run() ! { println(E.message) assert(false) return }
+    db.update("t").set("t.a", 1).set("`x``y`", 2).set("[a b]", 3).run() ! { println(E.message) assert(false) return }
+
+    // A map key from input cannot carry SQL into the statement
+    let before = driver.statements.length
+    let evil = "a) VALUES (1); DROP TABLE t; --"
+    db.insert_into("t").values(.{ evil => 1 }).run() ! {
+        assert(error_is(E.code, syntax))
+        assert(driver.statements.length == before)
+        db.update("t").set("a = 1, b", 2).run() ! {
+            assert(error_is(E.code, syntax))
+            db.insert_into("t").values(.{ "a" => 1 }).on_conflict_update(.{ "a" }, .{ "a\" = 1 --" }).run() ! {
+                assert(error_is(E.code, syntax))
+                assert(driver.statements.length == before)
+                return
+            }
+            assert(false)
+            return
+        }
+        assert(false)
+        return
+    }
+    assert(false)
+}
