@@ -118,3 +118,13 @@ test "Splitting bodies, block comments and dollar quotes" {
     assert(s.contains("CREATE PROCEDURE p() BEGIN IF 1 THEN SELECT 1; END IF; CASE 1 WHEN 1 THEN SELECT 2; END CASE; END"))
     assert(s.contains("SELECT 2"))
 }
+
+test "MySQL migrations keep backslash-escaped quotes together" {
+    let driver = fake()
+    driver.dialect_kind = sql.Dialect.mysql
+    let migrator = sql.Migrator.new(fake_db(driver))
+    migrator.add("0001", "INSERT INTO t VALUES ('a\\';b');\nSELECT 1;")
+    migrator.migrate() ! { println(E.message) assert(false) return }
+    assert(driver.statements.contains("INSERT INTO t VALUES ('a\\';b')"))
+    assert(driver.statements.contains("SELECT 1"))
+}

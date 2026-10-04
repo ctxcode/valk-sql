@@ -81,7 +81,7 @@ let found = db.all("SELECT * FROM users WHERE id IN (:ids)", .{ "ids" => ids }) 
 ```
 
 An empty list becomes `NULL`, so `IN (:ids)` matches nothing and `NOT IN (:ids)` matches nothing
-either. Text in quotes and Postgres casts such as `::int` are left alone, and a `?` of your own,
+either. Text in quotes (with MySQL's backslash escapes) and Postgres casts such as `::int` are left alone, and a `?` of your own,
 such as the Postgres JSON operator, stays what it is. A name without a value throws `syntax`.
 `sql.named(statement, values, dialect)` does the conversion by itself, for code that passes the
 statement on.

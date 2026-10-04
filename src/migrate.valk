@@ -103,7 +103,7 @@ use valk.time
     fn run_one(migration: Migration) !Error {
         let db = this.db
         db.begin() !>
-        each split_statements(migration.sql) as statement {
+        each split_statements(migration.sql, db.dialect) as statement {
             db.exec(statement) ! {
                 db.rollback() _
                 throw E { message: "Migration '" + migration.name + "' failed: " + E.message, sql: statement }
@@ -139,7 +139,7 @@ fn is_space(ch: u8) bool {
 
 // Splits a file into statements on `;`, keeping text in quotes and comments together. The body
 // of a `CREATE TRIGGER`, `PROCEDURE` or `FUNCTION` between `BEGIN` and `END` holds `;` of its own.
-fn split_statements(sql: String) Array[String] {
+fn split_statements(sql: String, dialect: Dialect (Dialect.sqlite)) Array[String] {
     let out: Array[String] = .{}
     let current = ByteBuffer.new(sql.length)
     let i: uint = 0
@@ -151,7 +151,7 @@ fn split_statements(sql: String) Array[String] {
     let depth: uint = 0
     let after_end = false
     while i < length {
-        let skipped = skip_quoted(sql, i)
+        let skipped = skip_quoted(sql, i, dialect == Dialect.mysql)
         if skipped > i {
             // Line comments are left out; everything else is kept as it is
             if sql[i] != '-' {

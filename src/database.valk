@@ -121,7 +121,7 @@
 
     // Keeps a statement whose values were all single, with the names in the order they were taken
     - fn remember(statement: String, text: String, args: Array[Value]) {
-        let names = named_order(statement)
+        let names = named_order(statement, this.driver.dialect)
         if names.length != args.length : return
         let known = this.statements ?? <{
             let created = Map[NamedStatement]{}

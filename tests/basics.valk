@@ -172,6 +172,15 @@ test "Placeholders inside comments and dollar quotes" {
     assert(body == "CREATE FUNCTION f() RETURNS int AS $$ SELECT :a; $$ LANGUAGE sql; SELECT $tag$ :b $tag$, a$b, ?")
     assert(none.length == 1)
 
+    // A backslash escapes a quote in MySQL strings and in Postgres E'' strings, and nowhere else
+    let my, my_args = sql.named("SELECT 'it\\'s :a', \"x\\\" :b\", :c", .{ "c" => 1 }, sql.Dialect.mysql) ! { println(E.message) assert(false) return }
+    assert(my == "SELECT 'it\\'s :a', \"x\\\" :b\", ?")
+    assert(my_args.length == 1)
+    let pg_escaped, _ = sql.named("SELECT E'it\\'s :a', :c", .{ "c" => 1 }, sql.Dialect.postgres) ! { println(E.message) assert(false) return }
+    assert(pg_escaped == "SELECT E'it\\'s :a', $1")
+    let lite_path, _ = sql.named("SELECT 'C:\\', :c", .{ "c" => 1 }) ! { println(E.message) assert(false) return }
+    assert(lite_path == "SELECT 'C:\\', ?")
+
     // A prepared statement reads its names the same way
     let driver = fake()
     let db = fake_db(driver)

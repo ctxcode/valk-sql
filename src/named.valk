@@ -8,12 +8,12 @@ global no_values: Array[Value] (Array[Value]{})
 global no_named_values: Map[Value] (Map[Value]{})
 
 // The names of the placeholders of `statement`, in order, a name as often as it appears
-fn named_order(statement: String) Array[String] {
+fn named_order(statement: String, dialect: Dialect) Array[String] {
     let names = Array[String]{}
     let i: uint = 0
     let length = statement.length
     while i < length {
-        let skipped = skip_quoted(statement, i)
+        let skipped = skip_quoted(statement, i, dialect == Dialect.mysql)
         if skipped > i {
             i = skipped
             continue
@@ -74,7 +74,7 @@ fn scan_named(statement: String, values: ?Map[Value], out: ByteBuffer, args: Arr
     let length = statement.length
     while i < length {
         // Quoted text and comments are copied as they are
-        let skipped = skip_quoted(statement, i)
+        let skipped = skip_quoted(statement, i, isset(dialect) && dialect == Dialect.mysql)
         if skipped > i {
             while i < skipped : out.write_byte(statement[i++])
             continue
@@ -106,14 +106,18 @@ fn scan_named(statement: String, values: ?Map[Value], out: ByteBuffer, args: Arr
 }
 
 // Where the quoted text or comment that starts at `i` ends, or `i` when none starts there. A
-// doubled quote inside ends the text and starts it again, which comes to the same.
-fn skip_quoted(text: String, i: uint) uint {
+// doubled quote inside ends the text and starts it again, which comes to the same. A backslash
+// escapes the next byte in MySQL strings and in Postgres `E'...'` strings.
+fn skip_quoted(text: String, i: uint, backslash: bool (false)) uint {
     let length = text.length
     let ch = text[i]
     if ch == '\'' || ch == '"' || ch == '`' {
+        let escapes = ch != '`' && (backslash || (ch == '\'' && is_escape_prefix(text, i)))
         let at = i + 1
         while at < length {
-            if text[at++] == ch : return at
+            let c = text[at++]
+            if c == ch : return at
+            if c == '\\' && escapes : at++
         }
         return length
     }
@@ -147,6 +151,12 @@ fn skip_quoted(text: String, i: uint) uint {
         return length
     }
     return i
+}
+
+// `E'` or `e'`, not the end of a longer word
+fn is_escape_prefix(text: String, quote: uint) bool {
+    if quote == 0 || (text[quote - 1] != 'E' && text[quote - 1] != 'e') : return false
+    return quote == 1 || !is_word_byte(text[quote - 2])
 }
 
 fn is_word_byte(ch: u8) bool {

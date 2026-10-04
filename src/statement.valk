@@ -63,7 +63,7 @@
 
 // Reads the placeholders of `statement` once, for `Db.prepare`
 fn prepare_statement(db: Db, statement: String) Statement !Error {
-    let names = named_order(statement)
+    let names = named_order(statement, db.dialect)
     if names.length == 0 {
         return Statement { db: db, sql: statement, text: statement, names: names }
     }
