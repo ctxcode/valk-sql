@@ -248,7 +248,7 @@ Namespaces: [main](#main)
     + fn join_on(table: String, condition: String, values: ?Map[Value] (null)) Query
     // Adds `LEFT JOIN <table> ON <condition>`, which keeps the rows that match nothing.
     + fn left_join(table: String, condition: String, values: ?Map[Value] (null)) Query
-    // Adds a `LIMIT`.
+    // Adds a `LIMIT`; `limit(0)` returns no rows.
     + fn limit(count: uint) Query
     // Adds an `OFFSET`.
     + fn offset(count: uint) Query

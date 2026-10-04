@@ -123,7 +123,7 @@ extend Query {
             seen += rows.length
 
             let last = rows.get(rows.length - 1) !? .{}
-            let next_after = last.get(column) ! {
+            let next_after = last.get(column) !? last.get(column_name(column)) ! {
                 throw .error { message: "The rows of this query have no column '" + column + "' to walk by" }
             }
             if next_after.is_null() {
@@ -136,4 +136,23 @@ extend Query {
             if rows.length < size : return seen
         }
     }
+}
+
+// The name a column has in a row: `users.id` and `"id"` are read as `id`
+fn column_name(column: String) String {
+    let start: uint = 0
+    let end = column.length
+    let i: uint = 0
+    while i < end {
+        if column[i] == '.' : start = i + 1
+        i++
+    }
+    if end > start + 1 {
+        let first = column[start]
+        if first == '"' || first == '`' || first == '[' {
+            start++
+            end--
+        }
+    }
+    return column.range(start, end - start)
 }

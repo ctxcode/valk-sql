@@ -20,6 +20,10 @@ test "Building selects" {
     // The same query, written for Postgres
     assert(query.to_sql(sql.Dialect.postgres) == "SELECT id, name FROM users WHERE (age > $1) AND (active = $2) ORDER BY name ASC LIMIT 10 OFFSET 20")
 
+    // A limit of 0 asks for no rows
+    assert(sql.Query.select().from("t").limit(0).to_sql() == "SELECT * FROM t LIMIT 0")
+    assert(sql.Query.select().from("t").page(3, 0).to_sql(sql.Dialect.mysql) == "SELECT * FROM t LIMIT 0")
+
     // Joins, groups and having
     let report = sql.Query.select("users.name, count(posts.id) AS posts")
         .from("users")
@@ -95,6 +99,13 @@ test "Running a built query" {
     let one = db.select().from("users").where("id", 4).one() ! { assert(false) return }
     assert(isset(one))
     assert((driver.statements.get(1) !? "").ends_with("LIMIT 1"))
+
+    // ...without changing the query for a later run
+    let reused = db.select().from("users").offset(5)
+    reused.one() ! { assert(false) return }
+    reused.all() ! { assert(false) return }
+    assert((driver.statements.get(2) !? "") == "SELECT * FROM users LIMIT 1 OFFSET 5")
+    assert((driver.statements.get(3) !? "") == "SELECT * FROM users LIMIT -1 OFFSET 5")
 
     // value() reads the first column
     driver.answer = .{ row(.{ "total" => sql.Value.of_int(12) }) }
@@ -367,6 +378,13 @@ test "Walking by a column instead of an offset" {
     let second_args = driver.statement_args.get(1) !? .{}
     assert(second_args.length == 2)
     assert((second_args.get(1) !? sql.Value.null()).to_int() == 9)
+
+    // A qualified or quoted column is read from the row by its own name
+    driver.answer = .{ row(.{ "id" => sql.Value.of_int(3) }) }
+    let qualified = db.select().from("t").chunk_by_id("t.id", 2, fn(rows: Array[Map[sql.Value]]) bool !sql.Error { return true }) ! { println(E.message) assert(false) return }
+    assert(qualified == 1)
+    let quoted = db.select().from("t").chunk_by_id(sql.quote_identifier("id"), 2, fn(rows: Array[Map[sql.Value]]) bool !sql.Error { return true }) ! { println(E.message) assert(false) return }
+    assert(quoted == 1)
 
     // A column the rows do not have is an error rather than an endless walk
     driver.answer = .{ row(.{ "other" => sql.Value.of_int(1) }) }

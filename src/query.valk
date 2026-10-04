@@ -59,6 +59,7 @@ class Assignment {
     conflict_columns: ?Array[String] (null)
     conflict_updates: ?Array[String] (null)
     row_limit: uint (0)
+    has_limit: bool (false)
     row_offset: uint (0)
     // The first mistake outside the conditions, thrown when the query runs
     problem: String ("")
@@ -286,9 +287,10 @@ class Assignment {
         this.orders = this.orders.length > 0 ? this.orders + ", " + columns : columns
         return this
     }
-    /// Adds a `LIMIT`.
+    /// Adds a `LIMIT`; `limit(0)` returns no rows.
     + fn limit(count: uint) SELF {
         this.row_limit = count
+        this.has_limit = true
         return this
     }
     /// Adds an `OFFSET`.
@@ -305,6 +307,7 @@ class Assignment {
     + fn page(number: uint, per_page: uint) SELF {
         let page = number > 0 ? number : 1
         this.row_limit = per_page
+        this.has_limit = true
         this.row_offset = (page - 1) * per_page
         return this
     }
@@ -477,15 +480,15 @@ class Assignment {
             out.write(" ORDER BY ")
             out.write(this.orders)
         }
-        if this.row_limit > 0 {
+        if this.has_limit {
             out.write(" LIMIT ")
             out.write_uint_ascii(this.row_limit)
         }
         if this.row_offset > 0 {
             // Every one of these databases takes OFFSET after LIMIT, and SQLite and MySQL need a
             // LIMIT in front of it
-            if this.row_limit == 0 && dialect == Dialect.mysql : out.write(" LIMIT 18446744073709551615")
-            if this.row_limit == 0 && dialect == Dialect.sqlite : out.write(" LIMIT -1")
+            if !this.has_limit && dialect == Dialect.mysql : out.write(" LIMIT 18446744073709551615")
+            if !this.has_limit && dialect == Dialect.sqlite : out.write(" LIMIT -1")
             out.write(" OFFSET ")
             out.write_uint_ascii(this.row_offset)
         }
@@ -528,8 +531,13 @@ class Assignment {
     + fn one() ?Map[Value] !Error {
         this.check() !>
         let db = this.database() !>
-        this.limit(1)
+        // One row is asked for, without changing the query for a later run
+        let limit = this.row_limit
+        let has_limit = this.has_limit
+        if !has_limit || limit > 1 : this.limit(1)
         let statement, args = this.build(db.dialect)
+        this.row_limit = limit
+        this.has_limit = has_limit
         let rows = db.driver.query(statement, args) !>
         let row: Map[Value] = .{}
         let found = rows.next(row) ! { rows.close() throw E }
@@ -554,18 +562,20 @@ class Assignment {
         let db = this.database() !>
         let columns = this.columns
         let limit = this.row_limit
+        let has_limit = this.has_limit
         let offset = this.row_offset
         let orders = this.orders
         // A grouped query answers a row per group, so its groups are what is counted
         let grouped = this.groups.length > 0
         if !grouped : this.columns = "count(" + expression + ") AS n"
-        this.row_limit = 0
+        this.has_limit = false
         this.row_offset = 0
         this.orders = ""
         let statement, args = this.build(db.dialect)
         if grouped : statement = "SELECT count(" + expression + ") AS n FROM (" + statement + ") AS counted"
         this.columns = columns
         this.row_limit = limit
+        this.has_limit = has_limit
         this.row_offset = offset
         this.orders = orders
 
