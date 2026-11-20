@@ -38,6 +38,8 @@ Namespaces: [main](#main)
 + fn row_to_json_value(row: Map[Value], bool_columns: ?Array[String] (null)) Value
 // Reads every row into a class or struct of your own, as `row_to` does for one.
 + fn rows_to[T](rows: Array[Map[Value]], bool_columns: ?Array[String] (null)) Array[T] !Error
+// Converts a class or struct's fields into a `Map[Value]` for `insert_into(...).values(...)` or `update(...).set_many(...)`.
++ fn values_of[T](record: T) Map[Value]
 ```
 
 ## Classes for 'main'

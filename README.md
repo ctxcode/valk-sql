@@ -5,7 +5,7 @@ One API over the SQL databases [Valk](https://valk-lang.dev) speaks: SQLite, MyS
 Postgres. It holds what every program writes again otherwise — a connection pool, migrations, a
 query builder, rows read into your own classes — and the driver packages plug into it.
 
-Requires Valk 0.7.3 or newer. Install it together with the driver for your database.
+Requires Valk 0.8.10 or newer. Install it together with the driver for your database.
 
 ## Install
 
@@ -280,18 +280,34 @@ and never decrease: a primary key, or a `uuid.v7()`. The order is set by the met
 
 ```rust
 class User {
-    id: uint
-    name: String
-    nickname: ?String
+    id: uint $tag(omitempty)
+    full_name: String $tag(sql: "full_name", json: "fullName")
+    nickname: ?String $tag(omitempty)
+    active: bool (false) $tag(sql: "is_active")
+    cached: String ("") $tag(sql: "-")
 }
 
-let users = sql.rows_to[User](db.all("SELECT id, name, nickname FROM users") ! panic("%{E.message}")) ! panic("%{E.message}")
+let users = sql.rows_to[User](db.all("SELECT id, full_name, nickname, is_active FROM users") ! panic("%{E.message}")) ! panic("%{E.message}")
 ```
 
-Fields are matched by name; a nullable field takes a NULL column and a field with a default may
-be missing. SQLite and MySQL have no boolean type and store 1 and 0, which no longer look like
-a bool, so name those columns: `sql.rows_to[User](rows, .{ "active" })`. Postgres booleans need
-no help. Reading the values yourself is faster, for the hottest loops.
+Fields are matched by name unless overridden with `$tag(sql: "col_name")`. Use `$tag(sql: "-")` to
+skip a field (keeping its default value on scan) and `$tag(omitempty)` to omit zero, empty, or
+null fields in `values_of` (and accept missing/NULL columns when the field has a default). `sql`
+tags are independent of `json` tags: if no `sql` tag is present, the field name is used.
+
+Boolean fields accept both Postgres booleans and SQLite/MySQL `0`/`1` integers automatically; pass
+`bool_columns` (e.g. `sql.rows_to[User](rows, .{ "is_active" })`) when a column stores text
+booleans such as `"true"` or `"yes"`. Custom types implementing `to_json_string()` /
+`from_json_value_auto` (such as `uuid.Uuid`, `uuid.Ulid`, and `decimal.Decimal`) and nested JSON
+columns are converted automatically.
+
+`sql.values_of(record)` converts a class or struct back into a `Map[sql.Value]` respecting the
+same `$tag(sql: ...)`, `$tag(sql: "-")`, and `$tag(omitempty)` tags:
+
+```rust
+db.insert_into("users").values(sql.values_of(user)).run() ! panic("%{E.message}")
+db.update("users").set_many(sql.values_of(user)).where("id", user.id).run() ! panic("%{E.message}")
+```
 
 ## Transactions
 

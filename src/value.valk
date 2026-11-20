@@ -201,6 +201,8 @@ fn not_given() Value {
     return Value.of_int(data.to(int))
     #elif T.$is_float
     return Value.of_float(data.to(float))
+    #elif T.$nonnull.$has_method(to_json_string)
+    return Value.of(data.to_json_string())
     #else
     #error "Cannot convert this value to a sql Value"
     #end

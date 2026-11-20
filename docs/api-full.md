@@ -63,6 +63,8 @@ only ever an argument, which a statement expands into one value per item.
 + fn row_to_json_value(row: Map[Value], bool_columns: ?Array[String] (null)) Value
 // Reads every row into a class or struct of your own, as `row_to` does for one.
 + fn rows_to[T](rows: Array[Map[Value]], bool_columns: ?Array[String] (null)) Array[T] !Error
+// Converts a class or struct's fields into a `Map[Value]` for `insert_into(...).values(...)` or `update(...).set_many(...)`.
++ fn values_of[T](record: T) Map[Value]
 ```
 
 ### convert
@@ -101,28 +103,34 @@ db.select().from("users").order_by(sql.quote_identifier(sort_column, db.dialect)
 
 Reads a row into a class or struct of your own.
 
-Every field of `T` must be a column of the row, unless the field is nullable or has a
-default. Fields are matched by name: a text column reaches a `String` field and a number
-column an `int` or a `float` field.
+Every field of `T` must be a column of the row, unless the field is nullable, has a default, or
+is marked `$tag(sql: "-")`. Field tags control column matching:
+- `$tag(sql: "col_name")` matches column `col_name` instead of the field name.
+- `$tag(sql: "-")` skips the field and uses its default value.
+- `$tag(omitempty)` allows missing or `NULL` columns when the field has a default.
 
-SQLite and MySQL have no boolean type and store 1 and 0, which cannot be told from any other
-number, so name those columns in `bool_columns` to read them into a `bool` field. A Postgres
-boolean needs no help.
+`sql` tags are independent of `json` tags: if no `sql` tag is present, the field name is used.
 
-This goes through the JSON decoder, so it is for readable code rather than for the hottest
-loop; reading the columns by hand stays available.
+Boolean fields accept Postgres booleans as well as SQLite/MySQL `0` and `1` integers directly.
+Pass `bool_columns` if a column holds text booleans (such as `"true"` or `"yes"`) or other
+non-zero integers.
+
+Types with `from_json_value` / `from_json_value_auto` (such as `Uuid`, `Ulid`, `Decimal`) and
+nested JSON columns (`json.Value`, arrays, maps, nested classes/structs stored as JSON text)
+are decoded automatically.
 
 ```valk
 class User {
     id: uint
-    name: String
+    full_name: String $tag(sql: "full_name")
     nickname: ?String
+    cached: String ("") $tag(sql: "-")
 }
 
 let row = db.one("SELECT * FROM users WHERE id = :id", .{ "id" => 1 }) ! panic("%{E.message}")
 if isset(row) {
     let user = sql.row_to[User](row) ! panic("%{E.message}")
-    println(user.name)
+    println(user.full_name)
 }
 ```
 
@@ -133,6 +141,20 @@ Returns the row as a JSON object, for an answer that goes straight out as JSON.
 ### rows_to
 
 Reads every row into a class or struct of your own, as `row_to` does for one.
+
+### values_of
+
+Converts a class or struct's fields into a `Map[Value]` for `insert_into(...).values(...)` or
+`update(...).set_many(...)`.
+
+Field tags control column mapping:
+- `$tag(sql: "col_name")` writes the field under `col_name` instead of the field name.
+- `$tag(sql: "-")` omits the field.
+- `$tag(omitempty)` omits the field when it is `null`, `0`, `false`, `""`, or nil.
+
+```valk
+db.insert_into("users").values(sql.values_of(user)).run() ! panic("%{E.message}")
+```
 
 ## Classes for 'main'
 

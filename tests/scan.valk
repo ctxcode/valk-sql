@@ -1,0 +1,284 @@
+use sql
+use valk.json
+
+struct FakeId {
+    raw: String ("")
+
+    + fn is_nil() bool {
+        return this.raw.length == 0
+    }
+
+    + fn to_json_string() String {
+        return this.raw
+    }
+
+    + static fn from_json_value_auto[X](value: X) FakeId !LookupError {
+        if !value.is_string : throw .missing
+        if !value.string.starts_with("id_") : throw .missing
+        return FakeId { raw: value.string }
+    }
+}
+
+class ProfileMeta {
+    theme: String ("light")
+    level: int (1)
+}
+
+class TaggedAccount {
+    id: uint $tag(omitempty)
+    external_id: FakeId $tag(sql: "ext_id", omitempty)
+    parent_id: ?FakeId $tag(sql: "parent_ext_id")
+    full_name: String $tag(sql: "full_name", json: "fullName")
+    email: String $tag(sql: "email_addr")
+    password_hash: String ("") $tag(json: "-")
+    nickname: ?String $tag(omitempty)
+    active: bool (false) $tag(sql: "is_active")
+    score: int (0) $tag(omitempty)
+    tags: Array[String] (Array[String]{})
+    meta: ProfileMeta (ProfileMeta {})
+    computed: String ("local") $tag(sql: "-")
+}
+
+struct PointRow {
+    x: int $tag(sql: "pos_x")
+    y: int $tag(sql: "pos_y")
+    label: String ("origin") $tag(sql: "-")
+}
+
+test "row_to and rows_to with sql tags" {
+    let r1 = row(.{
+        "id" => sql.Value.of_int(7)
+        "ext_id" => sql.Value.of("id_abc")
+        "parent_ext_id" => sql.Value.null()
+        "full_name" => sql.Value.of("Ada Lovelace")
+        "email_addr" => sql.Value.of("ada@example.com")
+        "password_hash" => sql.Value.of("secret_hash")
+        "nickname" => sql.Value.null()
+        "is_active" => sql.Value.of_int(1)
+        "score" => sql.Value.of_int(42)
+        "tags" => sql.Value.of("[\"admin\",\"founder\"]")
+        "meta" => sql.Value.of("{\"theme\":\"dark\",\"level\":5}")
+        "computed" => sql.Value.of("should-be-ignored")
+    })
+
+    let acc = sql.row_to[TaggedAccount](r1) ! { println(E.message) assert(false) return }
+    assert(acc.id == 7)
+    assert(acc.external_id.raw == "id_abc")
+    assert(!isset(acc.parent_id))
+    assert(acc.full_name == "Ada Lovelace")
+    assert(acc.email == "ada@example.com")
+    // json: "-" does NOT hide the field from SQL scanning
+    assert(acc.password_hash == "secret_hash")
+    assert(!isset(acc.nickname))
+    // SQLite/MySQL 0/1 int scans directly into bool without bool_columns
+    assert(acc.active)
+    assert(acc.score == 42)
+    assert(acc.tags.length == 2)
+    assert((acc.tags.get(0) !? "") == "admin")
+    assert((acc.tags.get(1) !? "") == "founder")
+    assert(acc.meta.theme == "dark")
+    assert(acc.meta.level == 5)
+    // sql: "-" skips the column and keeps the field default
+    assert(acc.computed == "local")
+
+    // rows_to with 0 int -> false, nullable custom type set, and missing omitempty columns
+    let r2 = row(.{
+        "ext_id" => sql.Value.of("id_def")
+        "parent_ext_id" => sql.Value.of("id_abc")
+        "full_name" => sql.Value.of("Grace Hopper")
+        "email_addr" => sql.Value.of("grace@example.com")
+        "is_active" => sql.Value.of_int(0)
+    })
+    let list = sql.rows_to[TaggedAccount](.{ r1, r2 }) ! { println(E.message) assert(false) return }
+    assert(list.length == 2)
+    let second = list.get(1) ! { assert(false) return }
+    assert(second.id == 0)
+    assert(second.external_id.raw == "id_def")
+    assert((second.parent_id ?? FakeId {}).raw == "id_abc")
+    assert(second.full_name == "Grace Hopper")
+    assert(!second.active)
+    assert(second.score == 0)
+    assert(second.computed == "local")
+
+    // bool_columns still handles text booleans on sql-tagged columns
+    let r3 = row(.{
+        "ext_id" => sql.Value.of("id_ghi")
+        "full_name" => sql.Value.of("Alan Turing")
+        "email_addr" => sql.Value.of("alan@example.com")
+        "is_active" => sql.Value.of("yes")
+    })
+    let third = sql.row_to[TaggedAccount](r3, .{ "is_active" }) ! { println(E.message) assert(false) return }
+    assert(third.active)
+
+    // Invalid custom from_json_value_auto value fails cleanly
+    let bad = row(.{
+        "ext_id" => sql.Value.of("bad_prefix")
+        "full_name" => sql.Value.of("Bad")
+        "email_addr" => sql.Value.of("bad@example.com")
+    })
+    let failed = false
+    sql.row_to[TaggedAccount](bad) ! {
+        assert(error_is(E.code, error))
+        failed = true
+    }
+    assert(failed)
+
+    // Struct scanning with sql tags
+    let pt = sql.row_to[PointRow](row(.{ "pos_x" => sql.Value.of_int(10), "pos_y" => sql.Value.of_int(-4) })) ! {
+        println(E.message)
+        assert(false)
+        return
+    }
+    assert(pt.x == 10 && pt.y == -4 && pt.label == "origin")
+}
+
+test "values_of with sql tags, insert_into and update" {
+    // New record: id=0, nickname=null, score=0 are omitted due to omitempty; computed is omitted due to sql:"-"
+    let fresh = TaggedAccount {
+        id: 0
+        external_id: FakeId { raw: "id_new" }
+        parent_id: null
+        full_name: "Ada Lovelace"
+        email: "ada@example.com"
+        password_hash: "h123"
+        nickname: null
+        active: true
+        score: 0
+        tags: Array[String]{ "math", "code" }
+        meta: ProfileMeta { theme: "dark", level: 3 }
+        computed: "ignored"
+    }
+
+    let vals = sql.values_of(fresh)
+    assert(!vals.has("id"))
+    assert(!vals.has("nickname"))
+    assert(!vals.has("score"))
+    assert(!vals.has("computed"))
+    assert(!vals.has("fullName"))
+    assert((vals.get("ext_id") !? sql.Value.null()).to_string() == "id_new")
+    assert((vals.get("parent_ext_id") !? sql.Value.of("x")).is_null())
+    assert((vals.get("full_name") !? sql.Value.null()).to_string() == "Ada Lovelace")
+    assert((vals.get("email_addr") !? sql.Value.null()).to_string() == "ada@example.com")
+    assert((vals.get("password_hash") !? sql.Value.null()).to_string() == "h123")
+    assert((vals.get("is_active") !? sql.Value.null()).to_bool())
+    assert((vals.get("tags") !? sql.Value.null()).to_string() == "[\"math\",\"code\"]")
+    assert((vals.get("meta") !? sql.Value.null()).to_string() == "{\"theme\":\"dark\",\"level\":3}")
+
+    // Round-trip: values_of -> row_to reproduces the record
+    let back = sql.row_to[TaggedAccount](vals) ! { println(E.message) assert(false) return }
+    assert(back.external_id.raw == "id_new")
+    assert(back.full_name == "Ada Lovelace")
+    assert(back.email == "ada@example.com")
+    assert(back.password_hash == "h123")
+    assert(back.active)
+    assert(back.tags.length == 2 && (back.tags.get(1) !? "") == "code")
+    assert(back.meta.theme == "dark" && back.meta.level == 3)
+    assert(back.computed == "local")
+
+    // Nil FakeId is omitted when tagged omitempty
+    let nil_ext = TaggedAccount {
+        id: 5
+        external_id: FakeId {}
+        parent_id: FakeId { raw: "id_parent" }
+        full_name: "Bob"
+        email: "bob@example.com"
+        nickname: "bobby"
+        score: 99
+    }
+    let vals2 = sql.values_of[TaggedAccount](nil_ext)
+    assert((vals2.get("id") !? sql.Value.null()).to_int() == 5)
+    assert(!vals2.has("ext_id"))
+    assert((vals2.get("parent_ext_id") !? sql.Value.null()).to_string() == "id_parent")
+    assert((vals2.get("nickname") !? sql.Value.null()).to_string() == "bobby")
+    assert((vals2.get("score") !? sql.Value.null()).to_int() == 99)
+
+    // Works directly with insert_into and update
+    let driver = fake()
+    let db = fake_db(driver)
+    let pt = PointRow { x: 3, y: 9, label: "skip-me" }
+    db.insert_into("points").values(sql.values_of(pt)).run() ! { println(E.message) assert(false) return }
+    assert((driver.statements.get(0) !? "") == "INSERT INTO points (pos_x, pos_y) VALUES (?, ?)")
+    let ins_args = driver.statement_args.get(0) !? .{}
+    assert(ins_args.length == 2)
+    assert((ins_args.get(0) !? sql.Value.null()).to_int() == 3)
+    assert((ins_args.get(1) !? sql.Value.null()).to_int() == 9)
+
+    db.update("points").set_many(sql.values_of(pt)).where("id", 1).run() ! { println(E.message) assert(false) return }
+    assert((driver.statements.get(1) !? "") == "UPDATE points SET pos_x = ?, pos_y = ? WHERE (id = ?)")
+    let upd_args = driver.statement_args.get(1) !? .{}
+    assert(upd_args.length == 3)
+    assert((upd_args.get(0) !? sql.Value.null()).to_int() == 3)
+    assert((upd_args.get(1) !? sql.Value.null()).to_int() == 9)
+    assert((upd_args.get(2) !? sql.Value.null()).to_int() == 1)
+
+    // sql.convert also supports to_json_string() types
+    assert(sql.convert(FakeId { raw: "id_xyz" }).to_string() == "id_xyz")
+}
+
+class SpecialColumns {
+    payload: json.Value
+    raw: sql.Value
+    flag: ?bool $tag(sql: "opt_flag")
+    required_col: String $tag(sql: "req_col")
+}
+
+test "row_to and values_of special column types and json tag coexistence" {
+    let r = row(.{
+        "payload" => sql.Value.of("{\"ok\":true,\"n\":3}")
+        "raw" => sql.Value.of_blob("\x00\x01\x02")
+        "opt_flag" => sql.Value.of_int(1)
+        "req_col" => sql.Value.of("hello")
+    })
+    let rec = sql.row_to[SpecialColumns](r) ! { println(E.message) assert(false) return }
+    assert(rec.payload["ok"].bool)
+    assert(rec.payload["n"].int == 3)
+    assert(rec.raw.is_blob() && rec.raw.text.length == 3)
+    assert(isset(rec.flag) && (rec.flag ?? false))
+    assert(rec.required_col == "hello")
+
+    // Nullable bool with null and json.Value with null
+    let r_null = row(.{
+        "payload" => sql.Value.null()
+        "raw" => sql.Value.null()
+        "opt_flag" => sql.Value.null()
+        "req_col" => sql.Value.of("ok")
+    })
+    let rec_null = sql.row_to[SpecialColumns](r_null) ! { println(E.message) assert(false) return }
+    assert(rec_null.payload.is_null)
+    assert(rec_null.raw.is_null())
+    assert(!isset(rec_null.flag))
+
+    // Missing required sql-tagged column throws
+    let missing_req = row(.{
+        "payload" => sql.Value.null()
+        "raw" => sql.Value.null()
+    })
+    let threw = false
+    sql.row_to[SpecialColumns](missing_req) ! {
+        assert(error_is(E.code, error))
+        threw = true
+    }
+    assert(threw)
+
+    // values_of round-trip on SpecialColumns
+    let v = sql.values_of(rec)
+    assert((v.get("payload") !? sql.Value.null()).to_string().contains("\"ok\":true"))
+    assert((v.get("raw") !? sql.Value.null()).is_blob())
+    assert((v.get("opt_flag") !? sql.Value.null()).to_bool())
+    assert((v.get("req_col") !? sql.Value.null()).to_string() == "hello")
+
+    // Coexistence of sql and json tags on the same class
+    let acc = TaggedAccount {
+        id: 1
+        external_id: FakeId { raw: "id_coexist" }
+        full_name: "Ada"
+        email: "ada@example.com"
+        password_hash: "top-secret"
+    }
+    let as_json = json.encode(acc)
+    assert(as_json.contains("\"fullName\":\"Ada\""))
+    assert(!as_json.contains("top-secret"))
+    let as_sql = sql.values_of(acc)
+    assert((as_sql.get("full_name") !? sql.Value.null()).to_string() == "Ada")
+    assert((as_sql.get("password_hash") !? sql.Value.null()).to_string() == "top-secret")
+}
