@@ -70,7 +70,7 @@
 
     /// Commits the work. The transaction is closed afterwards.
     + fn commit() !Error {
-        if !this.open : throw .error { message: "This transaction was already finished" }
+        if !this.open : throw .error("This transaction was already finished", "", "")
         this.open = false
         // A commit that fails, such as on a busy SQLite database, can leave the transaction open
         this.db.commit() ! {

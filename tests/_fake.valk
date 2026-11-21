@@ -34,14 +34,14 @@ class FakeDriver is sql.Driver {
     }
 
     fn record(statement: String, args: Array[sql.Value]) !sql.Error {
-        if this.closed : throw .closed { message: "closed" }
+        if this.closed : throw .closed("closed", "", "")
         this.statements.append(statement)
         this.statement_args.append(args)
         if this.fail_with.length > 0 {
             if this.fail_when.length > 0 && !statement.contains(this.fail_when) : return
             let message = this.fail_with
             this.fail_with = ""
-            throw .constraint { message: message, sql: statement }
+            throw .constraint(message, "", statement)
         }
     }
 
@@ -52,7 +52,7 @@ class FakeDriver is sql.Driver {
         this.transactions.append(immediate ? "begin immediate" : "begin")
     }
     + fn commit() !sql.Error {
-        if this.fail_commit : throw .busy { message: "database is locked" }
+        if this.fail_commit : throw .busy("database is locked", "", "")
         this.transactions.append("commit")
     }
     + fn rollback() !sql.Error {

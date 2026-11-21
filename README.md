@@ -359,7 +359,7 @@ inside text, comments, `$$` bodies and the `BEGIN ... END` of a trigger or proce
 
 ```rust
 global pool: sql.Pool (sql.Pool.new(fn() sql.Db !sql.Error {
-    return sqlite.database(sqlite.open("app.db") ! throw .connect { message: E.message })
+    return sqlite.database(sqlite.open("app.db") ! throw .connect(E.message, "", ""))
 }, 8))
 
 fn handler(req: http.Request) http.Response {
@@ -375,21 +375,20 @@ handed out, and the wait yields to the other coroutines on the thread.
 
 ## Errors
 
-Every method throws `sql.Error`, whichever driver is behind it:
+Every method throws `sql.Error`, a tagged union whose variants each carry `(message, driver_code, sql)`, whichever driver is behind it:
 
-| code | when |
+| variant | when |
 | --- | --- |
-| `connect` | the database could not be opened or reached |
-| `syntax` | the statement could not be prepared |
-| `constraint` | a `UNIQUE`, `NOT NULL`, `CHECK` or foreign key rule was broken |
-| `busy` | the database was held by someone else for too long |
-| `readonly` | the database cannot be written |
-| `timeout` | no connection came back from the pool in time |
-| `closed` | the connection is closed |
-| `error` | anything else the driver reported |
+| `.connect` | the database could not be opened or reached |
+| `.syntax` | the statement could not be prepared |
+| `.constraint` | a `UNIQUE`, `NOT NULL`, `CHECK` or foreign key rule was broken |
+| `.busy` | the database was held by someone else for too long |
+| `.readonly` | the database cannot be written |
+| `.timeout` | no connection came back from the pool in time |
+| `.closed` | the connection is closed |
+| `.error` | anything else the driver reported |
 
-`driver_code` keeps the code the driver gave, such as a SQLSTATE (`23505`), for the cases where
-the exact reason matters.
+`E.message`, `E.driver_code` (such as a SQLSTATE like `23505`), and `E.sql` are available as getters on `sql.Error`, and `E.to_string()` returns `E.message`.
 
 ## Writing a driver
 

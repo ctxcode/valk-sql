@@ -7,13 +7,6 @@ Namespaces: [main](#main)
 
 # main
 
-## Errors for 'main'
-
-```js
-// Thrown by every operation of this package, and by the drivers behind it.
-+ error Error (connect, syntax, constraint, busy, readonly, timeout, closed, error) payload { message: String, driver_code: String (""), sql: String ("") }
-```
-
 ## Enums for 'main'
 
 ```js
@@ -148,6 +141,25 @@ Namespaces: [main](#main)
     // Runs a statement and returns its rows.
     + fn query(sql: String, args: Array[Value]) Rows !Error
     + fn rollback() void !Error
+}
+```
+
+```js
+// Thrown by every operation of this package, and by the drivers behind it.
++ union Error {
+    connect(String, String, String)
+    syntax(String, String, String)
+    constraint(String, String, String)
+    busy(String, String, String)
+    readonly(String, String, String)
+    timeout(String, String, String)
+    closed(String, String, String)
+    error(String, String, String)
+
+    + get driver_code: String
+    + get message: String
+    + get sql: String
+    + fn to_string() String
 }
 ```
 

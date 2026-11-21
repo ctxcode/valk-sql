@@ -45,7 +45,7 @@ test "Pool limit and waiting" {
     let held = pool.get() ! { assert(false) return }
     // Nothing comes back, so the wait ends with a timeout
     pool.get() ! {
-        assert(error_is(E.code, timeout))
+        assert(E is .timeout)
 
         // Another coroutine giving one back lets the next get through
         pool.wait_timeout_ms = 3000
@@ -67,11 +67,11 @@ fn give_back(pool: sql.Pool, db: sql.Db) {
 
 test "Pool reports an opener that fails" {
     let pool = sql.Pool.new(fn() sql.Db !sql.Error {
-        throw .connect { message: "no database here" }
+        throw .connect("no database here", "", "")
     }, 2, 2)
 
     pool.get() ! {
-        assert(error_is(E.code, connect))
+        assert(E is .connect)
         assert(E.message == "no database here")
         // The failed attempt does not count against the pool
         assert(pool.size == 0)

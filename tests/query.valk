@@ -121,7 +121,7 @@ test "Running a built query" {
 
     // A query that was never bound to a database says so
     sql.Query.select().from("t").all() ! {
-        assert(error_is(E.code, error))
+        assert(E is .error)
         assert(E.message.contains("not bound"))
         return
     }
@@ -158,7 +158,7 @@ test "Rows into classes" {
     // A row that does not fit says which type it did not fit
     let wrong = row(.{ "id" => sql.Value.of_int(1) })
     sql.row_to[TestUser](wrong) ! {
-        assert(error_is(E.code, error))
+        assert(E is .error)
         assert(E.message.contains("does not fit"))
         assert(E.message.contains("id"))
         return
@@ -308,7 +308,7 @@ test "A transaction without a closure" {
 
     // Committing twice is refused rather than sent twice
     tx.commit() ! {
-        assert(error_is(E.code, error))
+        assert(E is .error)
         assert(E.message.contains("already finished"))
         return
     }
@@ -350,7 +350,7 @@ test "Walking a result in chunks" {
 
     // A chunk of nothing would never end
     db.select().from("t").chunk(0, fn(rows: Array[Map[sql.Value]]) bool !sql.Error { return true }) ! {
-        assert(error_is(E.code, error))
+        assert(E is .error)
         return
     }
     assert(false)
@@ -389,7 +389,7 @@ test "Walking by a column instead of an offset" {
     // A column the rows do not have is an error rather than an endless walk
     driver.answer = .{ row(.{ "other" => sql.Value.of_int(1) }) }
     db.select().from("t").chunk_by_id("id", 2, fn(rows: Array[Map[sql.Value]]) bool !sql.Error { return true }) ! {
-        assert(error_is(E.code, error))
+        assert(E is .error)
         assert(E.message.contains("no column 'id'"))
         return
     }
@@ -475,7 +475,7 @@ test "A commit that fails rolls back" {
     let tx = db.begin_transaction() ! { assert(false) return }
     driver.fail_commit = true
     tx.commit() ! {
-        assert(error_is(E.code, busy))
+        assert(E is .busy)
         assert(!tx.open)
         assert(driver.transactions.contains("rollback"))
         return
@@ -515,7 +515,7 @@ test "Builder statements are valid for every database" {
     let driver = fake()
     let db = fake_db(driver)
     db.select().from("t").where("a", "= 1 OR 1 =", 1).all() ! {
-        assert(error_is(E.code, syntax))
+        assert(E is .syntax)
         assert(driver.statements.length == 0)
         return
     }
@@ -529,7 +529,7 @@ test "Every row of an insert has the same columns" {
     insert.values(.{ "a" => 1, "b" => 2 })
     insert.values(.{ "a" => 3, "c" => 4 })
     insert.run() ! {
-        assert(error_is(E.code, syntax))
+        assert(E is .syntax)
         assert(driver.statements.length == 0)
         return
     }
@@ -575,12 +575,12 @@ test "Insert and update columns must be names" {
     let before = driver.statements.length
     let evil = "a) VALUES (1); DROP TABLE t; --"
     db.insert_into("t").values(.{ evil => 1 }).run() ! {
-        assert(error_is(E.code, syntax))
+        assert(E is .syntax)
         assert(driver.statements.length == before)
         db.update("t").set("a = 1, b", 2).run() ! {
-            assert(error_is(E.code, syntax))
+            assert(E is .syntax)
             db.insert_into("t").values(.{ "a" => 1 }).on_conflict_update(.{ "a" }, .{ "a\" = 1 --" }).run() ! {
-                assert(error_is(E.code, syntax))
+                assert(E is .syntax)
                 assert(driver.statements.length == before)
                 return
             }

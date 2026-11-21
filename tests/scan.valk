@@ -118,7 +118,7 @@ test "row_to and rows_to with sql tags" {
     })
     let failed = false
     sql.row_to[TaggedAccount](bad) ! {
-        assert(error_is(E.code, error))
+        assert(E is .error)
         failed = true
     }
     assert(failed)
@@ -255,7 +255,7 @@ test "row_to and values_of special column types and json tag coexistence" {
     })
     let threw = false
     sql.row_to[SpecialColumns](missing_req) ! {
-        assert(error_is(E.code, error))
+        assert(E is .error)
         threw = true
     }
     assert(threw)

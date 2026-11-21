@@ -101,7 +101,7 @@
                 let listed = false
                 each names as name {
                     let value = named_values.get(name) ! {
-                        throw .syntax { message: "No value for the placeholder ':" + name + "'", sql: statement }
+                        throw .syntax("No value for the placeholder ':" + name + "'", "", statement)
                     }
                     if value.type == TYPE.list {
                         listed = true

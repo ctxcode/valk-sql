@@ -53,8 +53,8 @@
         let given = values ?? no_named_values
         let args = Array[Value].new(names.length)
         each names as name {
-            let value = given.get(name) ! throw .syntax { message: "No value for the placeholder ':" + name + "'", sql: this.sql }
-            if value.type == TYPE.list : throw .syntax { message: "A list cannot be bound to ':" + name + "' of a prepared statement", sql: this.sql }
+            let value = given.get(name) ! throw .syntax("No value for the placeholder ':" + name + "'", "", this.sql)
+            if value.type == TYPE.list : throw .syntax("A list cannot be bound to ':" + name + "' of a prepared statement", "", this.sql)
             args.append(value)
         }
         return args

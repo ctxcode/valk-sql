@@ -83,7 +83,7 @@ test "Transactions" {
     db.transaction(fn(tx: sql.Db) !sql.Error {
         tx.exec("INSERT INTO accounts VALUES (1)") !>
     }) ! {
-        assert(error_is(E.code, constraint))
+        assert(E is .constraint)
         assert((driver.transactions.get(3) !? "") == "rollback")
         assert(driver.transactions.length == 4)
         return
@@ -187,4 +187,14 @@ test "Placeholders inside comments and dollar quotes" {
     let prepared = db.prepare("SELECT :id -- don't :skip") ! { assert(false) return }
     prepared.exec(.{ "id" => 1 }) ! { println(E.message) assert(false) return }
     assert((driver.statements.get(0) !? "") == "SELECT ? -- don't :skip")
+}
+
+test "Error fields and string conversion" {
+    let err: sql.Error = .constraint("duplicate key", "23505", "INSERT INTO t VALUES (1)")
+    assert(err is .constraint)
+    assert(err.message == "duplicate key")
+    assert(err.driver_code == "23505")
+    assert(err.sql == "INSERT INTO t VALUES (1)")
+    assert(err.to_string() == "duplicate key")
+    assert("%{err}" == "duplicate key")
 }

@@ -97,9 +97,9 @@ fn scan_named(statement: String, values: ?Map[Value], out: ByteBuffer, args: Arr
             continue
         }
         let name = statement.range(start, i - start)
-        let named_values = values ?! throw .syntax { message: "No value for the placeholder ':" + name + "'", sql: statement }
+        let named_values = values ?! throw .syntax("No value for the placeholder ':" + name + "'", "", statement)
         let value = named_values.get(name) ! {
-            throw .syntax { message: "No value for the placeholder ':" + name + "'", sql: statement }
+            throw .syntax("No value for the placeholder ':" + name + "'", "", statement)
         }
         place_value(out, args, value, dialect)
     }

@@ -7,29 +7,6 @@ Namespaces: [main](#main)
 
 # main
 
-## Errors for 'main'
-
-```js
-// Thrown by every operation of this package, and by the drivers behind it.
-+ error Error (connect, syntax, constraint, busy, readonly, timeout, closed, error) payload { message: String, driver_code: String (""), sql: String ("") }
-```
-
-### Error
-
-Thrown by every operation of this package, and by the drivers behind it.
-
-- `connect`: the database could not be opened or reached.
-- `syntax`: the statement could not be prepared: a typo, an unknown table or column.
-- `constraint`: a `UNIQUE`, `NOT NULL`, `CHECK` or foreign key rule was broken.
-- `busy`: the database was held by someone else for longer than the driver waits.
-- `readonly`: the database cannot be written.
-- `timeout`: a connection did not come back from the pool in time.
-- `closed`: the connection is closed.
-- `error`: anything else the driver reported.
-
-`driver_code` holds the code the driver gave, such as a SQLSTATE (`23505`) or a SQLite
-result code, so a caller that needs the exact reason still has it.
-
 ## Enums for 'main'
 
 ```js
@@ -535,6 +512,42 @@ Returns whether the connection still answers.
 Runs a statement and returns its rows.
 
 ```js
+// Thrown by every operation of this package, and by the drivers behind it.
++ union Error {
+    connect(String, String, String)
+    syntax(String, String, String)
+    constraint(String, String, String)
+    busy(String, String, String)
+    readonly(String, String, String)
+    timeout(String, String, String)
+    closed(String, String, String)
+    error(String, String, String)
+
+    + get driver_code: String
+    + get message: String
+    + get sql: String
+    + fn to_string() String
+}
+```
+
+### Error
+
+Thrown by every operation of this package, and by the drivers behind it.
+
+Each variant carries `(message, driver_code, sql)`. `driver_code` holds the code the driver
+gave, such as a SQLSTATE (`23505`) or a SQLite result code, or `""` when there is none.
+`sql` holds the statement that failed, or `""` when none applies.
+
+- `connect(message, driver_code, sql)`: the database could not be opened or reached.
+- `syntax(message, driver_code, sql)`: the statement could not be prepared: a typo, an unknown table or column.
+- `constraint(message, driver_code, sql)`: a `UNIQUE`, `NOT NULL`, `CHECK` or foreign key rule was broken.
+- `busy(message, driver_code, sql)`: the database was held by someone else for longer than the driver waits.
+- `readonly(message, driver_code, sql)`: the database cannot be written.
+- `timeout(message, driver_code, sql)`: a connection did not come back from the pool in time.
+- `closed(message, driver_code, sql)`: the connection is closed.
+- `error(message, driver_code, sql)`: anything else the driver reported.
+
+```js
 // One migration: a name and the statements it runs.
 + class Migration {
     // The name, which is also the order they run in. A timestamp in front keeps them in order, as in `0001-users.sql` or `20260918-add-index.sql`.
@@ -678,7 +691,7 @@ runs the global initializers.
 
 ```valk
 global pool: sql.Pool (sql.Pool.new(fn() sql.Db !sql.Error {
-    return sqlite.database(sqlite.open("app.db") ! throw .connect { message: E.message })
+    return sqlite.database(sqlite.open("app.db") ! throw .connect(E.message, "", ""))
 }, 8))
 
 fn handler(req: http.Request) http.Response {

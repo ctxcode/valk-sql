@@ -8,7 +8,7 @@ use valk.time
 ///
 /// ```valk
 /// global pool: sql.Pool (sql.Pool.new(fn() sql.Db !sql.Error {
-///     return sqlite.database(sqlite.open("app.db") ! throw .connect { message: E.message })
+///     return sqlite.database(sqlite.open("app.db") ! throw .connect(E.message, "", ""))
 /// }, 8))
 ///
 /// fn handler(req: http.Request) http.Response {
@@ -78,7 +78,7 @@ use valk.time
             }
 
             if deadline > 0 && time.mono_us() >= deadline {
-                throw .timeout { message: "No connection came back within %{this.wait_timeout_ms}ms" }
+                throw .timeout("No connection came back within %{this.wait_timeout_ms}ms", "", "")
             }
             // Waiting yields to the other coroutines on this thread
             time.sleep_ms(1)

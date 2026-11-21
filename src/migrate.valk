@@ -106,7 +106,7 @@ use valk.time
         each split_statements(migration.sql, db.dialect) as statement {
             db.exec(statement) ! {
                 db.rollback() _
-                throw E { message: "Migration '" + migration.name + "' failed: " + E.message, sql: statement }
+                throw migration_error(E, "Migration '" + migration.name + "' failed: " + E.message, statement)
             }
         }
         db.exec("INSERT INTO " + this.table + " (name, applied_at) VALUES (:name, :at)", .{ "name" => migration.name, "at" => time.DateTime.now().to_iso8601() }) ! {
@@ -208,4 +208,18 @@ fn ends_block_statement(sql: String, at: uint) bool {
     while i < sql.length && is_word_byte(sql[i]) : i++
     let word = sql.range(start, i - start)
     return word_is(word, "IF") || word_is(word, "LOOP") || word_is(word, "WHILE") || word_is(word, "REPEAT")
+}
+
+fn migration_error(err: Error, message: String, sql: String) Error {
+    let code = err.driver_code
+    return match err : Error {
+        .connect(_, _, _) => .connect(message, code, sql)
+        .syntax(_, _, _) => .syntax(message, code, sql)
+        .constraint(_, _, _) => .constraint(message, code, sql)
+        .busy(_, _, _) => .busy(message, code, sql)
+        .readonly(_, _, _) => .readonly(message, code, sql)
+        .timeout(_, _, _) => .timeout(message, code, sql)
+        .closed(_, _, _) => .closed(message, code, sql)
+        .error(_, _, _) => .error(message, code, sql)
+    }
 }

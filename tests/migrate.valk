@@ -54,7 +54,7 @@ test "A migration that fails rolls back" {
     driver.fail_with = "syntax error"
     driver.fail_when = "CREATE TABLE t"
     migrator.migrate() ! {
-        assert(error_is(E.code, constraint))
+        assert(E is .constraint)
         assert(E.message.contains("0001-broken.sql"))
         assert(driver.transactions.contains("rollback"))
         assert(!driver.transactions.contains("commit"))

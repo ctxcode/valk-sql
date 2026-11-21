@@ -526,7 +526,7 @@ class Assignment {
         if problem.length == 0 && isset(conditions) : problem = conditions.problem
         let havings = this.havings
         if problem.length == 0 && isset(havings) : problem = havings.problem
-        if problem.length > 0 : throw .syntax { message: problem }
+        if problem.length > 0 : throw .syntax(problem, "", "")
     }
 
     /// Runs the statement and returns how many rows it changed.
@@ -657,7 +657,7 @@ class Assignment {
 
     fn database() Db !Error {
         let db = this.db
-        if !isset(db) : throw .error { message: "This query is not bound to a database; use db.select(...) or query.on(db)", sql: this.to_sql() }
+        if !isset(db) : throw .error("This query is not bound to a database; use db.select(...) or query.on(db)", "", this.to_sql())
         return db
     }
 }

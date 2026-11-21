@@ -41,12 +41,12 @@ test "Prepared statements" {
     // A missing value or a list throws syntax
     let missing = false
     insert.exec(.{ "a" => 1 }) ! {
-        missing = error_is(E.code, syntax)
+        missing = E is .syntax
     }
     assert(missing)
     let listed = false
     find.all(.{ "a" => Array[int]{ 1, 2 } }) ! {
-        listed = error_is(E.code, syntax)
+        listed = E is .syntax
     }
     assert(listed)
 

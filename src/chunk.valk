@@ -56,7 +56,7 @@ extend Query {
     /// }) ! panic("%{E.message}")
     /// ```
     + fn chunk(size: uint, handler: fn(Array[Map[Value]])(bool !Error)) uint !Error {
-        if size == 0 : throw .error { message: "A chunk of 0 rows would never end" }
+        if size == 0 : throw .error("A chunk of 0 rows would never end", "", "")
         this.check() !>
         let db = this.database() !>
         let seen: uint = 0
@@ -95,7 +95,7 @@ extend Query {
     /// }) ! panic("%{E.message}")
     /// ```
     + fn chunk_by_id(column: String, size: uint, handler: fn(Array[Map[Value]])(bool !Error)) uint !Error {
-        if size == 0 : throw .error { message: "A chunk of 0 rows would never end" }
+        if size == 0 : throw .error("A chunk of 0 rows would never end", "", "")
         this.check() !>
         let db = this.database() !>
         let seen: uint = 0
@@ -124,10 +124,10 @@ extend Query {
 
             let last = rows.get(rows.length - 1) !? .{}
             let next_after = last.get(column) !? last.get(column_name(column)) ! {
-                throw .error { message: "The rows of this query have no column '" + column + "' to walk by" }
+                throw .error("The rows of this query have no column '" + column + "' to walk by", "", "")
             }
             if next_after.is_null() {
-                throw .error { message: "The column '" + column + "' is NULL in a row, so the walk cannot go on from it" }
+                throw .error("The column '" + column + "' is NULL in a row, so the walk cannot go on from it", "", "")
             }
             after = next_after
 

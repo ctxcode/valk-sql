@@ -36,7 +36,7 @@ use valk.json
 /// ```
 + fn row_to[T](row: Map[Value], bool_columns: ?Array[String] (null)) T !Error {
     return row_to_inner[T](row, bool_columns) ! {
-        throw .error { message: "This row does not fit the type it was read into; its columns were: " + column_names(row) }
+        throw .error("This row does not fit the type it was read into; its columns were: " + column_names(row), "", "")
     }
 }
 
