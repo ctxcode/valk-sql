@@ -10,15 +10,15 @@ Requires Valk 0.8.10 or newer. Install it together with the driver for your data
 ## Install
 
 ```
-vman install github.com/ctxcode/valk-sql
+vman install github.com/zikue/valk-sql
 ```
 
 Together with a driver, whichever you use:
 
 ```
-vman install github.com/ctxcode/valk-sqlite
-vman install github.com/ctxcode/valk-postgres
-vman install github.com/ctxcode/valk-mysql
+vman install github.com/zikue/valk-sqlite
+vman install github.com/zikue/valk-postgres
+vman install github.com/zikue/valk-mysql
 ```
 
 ## Example
